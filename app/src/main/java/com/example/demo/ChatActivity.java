@@ -1,0 +1,412 @@
+package com.example.demo;
+
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.TextView;
+import android.widget.ImageView;
+import android.widget.Toast;
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.lifecycle.ViewModelProvider;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.example.demo.R;
+import com.example.demo.adapter.MessageAdapter;
+import com.example.demo.data.Message;
+import com.example.demo.data.Persona;
+import com.example.demo.viewmodel.PersonaChatViewModel;
+import com.bumptech.glide.Glide;
+import android.media.MediaPlayer;
+import java.io.IOException;
+
+import java.util.List;
+
+/**
+ * 主要聊天界面 (ChatActivity)
+ */
+public class ChatActivity extends AppCompatActivity implements View.OnClickListener {
+
+    // 日志标签和常量定义
+    private static final String TAG = "ChatActivity";
+    public static final int STREAMING_PLACEHOLDER_ID = -1;
+    public static final String EXTRA_PERSONA_ID = "com.example.demo.PERSONA_ID";
+
+    private PersonaChatViewModel viewModel;// 数据与业务逻辑处理的ViewModel
+    private RecyclerView recyclerView;// 聊天消息列表
+    private MessageAdapter adapter;// 消息列表适配器
+    private EditText messageEditText;// 输入框
+    private Button sendButton;// 发送按钮
+
+    private View btnGoToFeed;// 跳转到社交广场
+    private View btnGoToCreation;// 跳转到角色创作
+    private View btnPublishDynamic;// 发布动态
+    private View btnGoToManagement;// 跳转到角色管理
+
+    private TextView tvPersonaName;// 角色名称
+    private TextView tvPersonaDescription;// 角色描述
+    private ImageView ivPersonaAvatar;// 角色头像
+
+    private Persona activePersona;// 当前活跃的角色
+    private MediaPlayer mediaPlayer;// 音频播放器（用于TTS）
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_chat);// 加载布局
+
+        // 初始化ViewModel
+        viewModel = new ViewModelProvider(this).get(PersonaChatViewModel.class);
+
+        initializeUI();// 初始化UI组件
+
+        setClickListeners();// 设置点击监听
+
+        setupRecyclerView(); // 初始化RecyclerView
+
+        // 初始化各种观察者（监听数据变化）
+        setupPersonaObserver();
+        setupMessageObserver();
+        setupDynamicPublishObserver();
+        setupGeneratedImageObserver();
+        setupImageGenerationObserver();
+        setupStreamingObservers();
+
+        // 初始化音频播放器
+        mediaPlayer = new MediaPlayer();
+        mediaPlayer.setOnCompletionListener(mp -> {
+            //播放完成后，重置 ViewModel 状态
+            viewModel.setSpeakingStatus(false);
+        });
+
+        // 设置TTS音频URL观察者
+        setupAudioPathObserver();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (mediaPlayer != null) {
+            mediaPlayer.release();// 释放播放器资源
+            mediaPlayer = null;
+        }
+    }
+
+    /**
+     *  设置 TTS 音频 URL 的观察者
+     */
+    private void setupAudioPathObserver() {
+        viewModel.getAudioFilePathLiveData().observe(this, audioUrl -> {
+            if (audioUrl != null && !audioUrl.isEmpty()) {
+                playAudio(audioUrl);
+                // 播放路径用完即清除
+                viewModel.clearAudioFilePath();
+            }
+        });
+
+        viewModel.getIsSpeakingLiveData().observe(this, isSpeaking -> {
+            Log.d(TAG, "TTS 播放状态更新: " + isSpeaking);
+        });
+    }
+
+    /**
+     * 播放指定 URL 的音频文件
+     */
+    private void playAudio(String audioUrl) {
+        try {
+            if (mediaPlayer.isPlaying()) {
+                mediaPlayer.stop();
+            }
+            mediaPlayer.reset();
+
+            mediaPlayer.setDataSource(audioUrl);
+
+            mediaPlayer.prepareAsync(); // 异步准备
+
+            mediaPlayer.setOnPreparedListener(mp -> {
+                mp.start();
+                viewModel.setSpeakingStatus(true);
+            });
+
+        } catch (IOException e) {
+            Log.e(TAG, "播放 TTS 音频文件失败: " + e.getMessage());
+            Toast.makeText(this, "播放语音失败", Toast.LENGTH_SHORT).show();
+            viewModel.setSpeakingStatus(false);
+        }
+    }
+
+    /**
+     * 初始化所有 UI 组件
+     */
+    private void initializeUI() {
+        tvPersonaName = findViewById(R.id.current_persona_name);
+        tvPersonaDescription = findViewById(R.id.current_persona_description);
+        ivPersonaAvatar = findViewById(R.id.current_persona_avatar);
+
+        recyclerView = findViewById(R.id.chat_recycler_view);
+        messageEditText = findViewById(R.id.message_edit_text);
+        sendButton = findViewById(R.id.send_button);
+
+        btnGoToCreation = findViewById(R.id.btn_go_to_creation);
+        btnGoToFeed = findViewById(R.id.btn_go_to_feed);
+        btnPublishDynamic = findViewById(R.id.btn_publish_dynamic);
+        btnGoToManagement = findViewById(R.id.btn_go_to_management);
+    }
+
+    /**
+     * 设置所有按钮的点击监听器
+     */
+    private void setClickListeners() {
+        sendButton.setOnClickListener(this);
+        btnGoToFeed.setOnClickListener(this);
+        btnGoToCreation.setOnClickListener(this);
+        btnPublishDynamic.setOnClickListener(this);
+        btnGoToManagement.setOnClickListener(this);
+    }
+
+    /**
+     * 【修改】设置 RecyclerView 和 Adapter，并实现 TTS 监听器
+     */
+    private void setupRecyclerView() {
+        adapter = new MessageAdapter(this, messageText -> {
+            if (viewModel.getIsSpeakingLiveData().getValue() != Boolean.TRUE) {
+                viewModel.synthesizeAndPlay(messageText);
+            } else {
+                Toast.makeText(this, "正在播放中，请稍候。", Toast.LENGTH_SHORT).show();
+            }
+        });
+
+        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        recyclerView.setAdapter(adapter);
+    }
+
+    /**
+     * 设置当前活跃 Persona 的 LiveData 观察者
+     */
+    private void setupPersonaObserver() {
+        viewModel.getActivePersonaLiveData().observe(this, persona -> {
+            if (persona != null) {
+                activePersona = persona;
+                updatePersonaUI(persona);// 更新角色信息UI
+            } else {
+                activePersona = null;
+                tvPersonaName.setText("未设置 Persona");
+                tvPersonaDescription.setText("点击【创作 Persona】按钮设置你的 AI 伙伴。");
+                ivPersonaAvatar.setImageResource(R.drawable.default_avatar);
+            }
+        });
+    }
+
+    /**
+     * 设置消息列表 LiveData 的观察者
+     */
+    private void setupMessageObserver() {
+        viewModel.getMessagesLiveData().observe(this, (List<Message> messages) -> {
+            if (viewModel.getIsStreaming().getValue() != Boolean.TRUE) {
+                updateChatUI(messages);
+            }
+        });
+    }
+
+    /**
+     * 设置流式输出 LiveData 的观察者
+     */
+    private void setupStreamingObservers() {
+        // 监听流式输出状态（是否正在返回内容）
+        viewModel.getIsStreaming().observe(this, isStreaming -> {
+            if (activePersona == null) return;
+
+            if (isStreaming) {
+                // 显示流式输出占位符
+                Message streamingPlaceholder = new Message(
+                        activePersona.getId(),
+                        "",
+                        false,
+                        activePersona.getName()
+                );
+                streamingPlaceholder.setId(STREAMING_PLACEHOLDER_ID);
+
+                adapter.addStreamingPlaceholder(streamingPlaceholder);
+                recyclerView.scrollToPosition(adapter.getItemCount() - 1);
+
+                // 禁用输入控件
+                sendButton.setEnabled(false);
+                messageEditText.setEnabled(false);
+
+            } else {
+                // 移除占位符，恢复输入控件可用
+                adapter.removeStreamingPlaceholder(STREAMING_PLACEHOLDER_ID);
+
+                sendButton.setEnabled(true);
+                messageEditText.setEnabled(true);
+
+                if (adapter.getItemCount() > 0) {
+                    recyclerView.scrollToPosition(adapter.getItemCount() - 1);
+                }
+            }
+        });
+
+        viewModel.getStreamingTextChunk().observe(this, chunk -> {
+            if (chunk != null) {
+                adapter.appendContentToPlaceholder(chunk);
+                recyclerView.scrollToPosition(adapter.getItemCount() - 1);
+            }
+        });
+    }
+
+    /**
+     * 设置图片生成状态的观察者
+     */
+    private void setupImageGenerationObserver() {
+        viewModel.getIsGeneratingImage().observe(this, isGenerating -> {
+            // 生成图片时禁用输入控件
+            sendButton.setEnabled(!isGenerating);
+            messageEditText.setEnabled(!isGenerating);
+
+            if (isGenerating) {
+                Toast.makeText(this, "正在让 Persona 生成图片...", Toast.LENGTH_SHORT).show();
+            } else {
+                if (adapter.getItemCount() > 0) {
+                    recyclerView.scrollToPosition(adapter.getItemCount() - 1);
+                }
+            }
+        });
+    }
+
+    /**
+     * 设置生成图片 URL 的观察者
+     */
+    private void setupGeneratedImageObserver() {
+        viewModel.getGeneratedImageUrl().observe(this, imageUrl -> {
+            if (activePersona == null) return;
+
+            if (imageUrl != null && !imageUrl.isEmpty()) {
+                // 创建一个包含图片 URL 的 Message
+                Message imageMessage = new Message(
+                        activePersona.getId(),
+                        "[AI生成图片]", // 消息文本作为占位符
+                        false, // AI 消息 (助手的回复)
+                        activePersona.getName()
+                );
+
+                imageMessage.setImageUrl(imageUrl);
+                viewModel.insertMessage(imageMessage);
+
+                viewModel.clearGeneratedImageUrl();
+            }
+        });
+    }
+
+
+    /**
+     * 设置动态发布成功 LiveData 的观察者
+     */
+    private void setupDynamicPublishObserver() {
+        viewModel.getDynamicPublishSuccess().observe(this, isSuccess -> {
+            if (isSuccess != null && isSuccess) {
+                String name = (activePersona != null) ? activePersona.getName() : "Persona";
+                Toast.makeText(this, name + " 的社交动态已发布成功！", Toast.LENGTH_LONG).show();
+                viewModel.resetDynamicPublishSuccessStatus();
+            }
+        });
+    }
+
+    /**
+     * 更新主界面 Persona 信息的私有方法
+     */
+    private void updatePersonaUI(Persona persona) {
+        tvPersonaName.setText(persona.getName());
+        tvPersonaDescription.setText(persona.getPersonality());
+
+        if (persona.getAvatarUrl() != null && !persona.getAvatarUrl().isEmpty()) {
+            Uri avatarUri = Uri.parse(persona.getAvatarUrl());
+
+            Glide.with(this)
+                    .load(avatarUri)
+                    .placeholder(R.drawable.default_avatar)
+                    .error(R.drawable.default_avatar)
+                    .into(ivPersonaAvatar);
+        } else {
+            ivPersonaAvatar.setImageResource(R.drawable.default_avatar);
+        }
+    }
+
+
+    /**
+     * LiveData 观察者回调，更新 RecyclerView
+     */
+    private void updateChatUI(List<Message> messages) {
+        if (messages != null) {
+            adapter.setMessages(messages);
+            adapter.notifyDataSetChanged();
+            if (!messages.isEmpty()) {
+                recyclerView.scrollToPosition(messages.size() - 1);
+            }
+        }
+    }
+
+    /**
+     * 处理发送消息的逻辑
+     */
+    private void sendMessage() {
+        String messageText = messageEditText.getText().toString().trim();
+
+        if (activePersona == null) {
+            Toast.makeText(this, "请先创建一个 Persona 才能开始聊天！", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (viewModel.getIsStreaming().getValue() == Boolean.TRUE) {
+            Toast.makeText(this, "Persona 正在回复，请稍候！", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (!messageText.isEmpty()) {
+            viewModel.sendMessage(messageText, activePersona);
+            messageEditText.setText("");
+        } else {
+            Toast.makeText(this, "不能发送空消息", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * 处理发布动态的逻辑
+     */
+    private void publishDynamic() {
+        if (activePersona == null) {
+            Toast.makeText(this, "请先创建一个 Persona！", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        Toast.makeText(this, "正在让 " + activePersona.getName() + " 发布一条社交动态...", Toast.LENGTH_LONG).show();
+
+        String topic = "今日日常或感受";
+        viewModel.generateAndPostDynamic(activePersona, topic);
+    }
+
+    @Override
+    public void onClick(@NonNull View v) {
+        int id = v.getId();
+        if (id == R.id.send_button) {
+            sendMessage();
+        }
+        else if (id == R.id.btn_go_to_creation) {
+            Intent intent = new Intent(ChatActivity.this, CreationActivity.class);
+            startActivity(intent);
+        }
+        else if (id == R.id.btn_go_to_feed) {
+            Intent intent = new Intent(ChatActivity.this, FeedActivity.class);
+            startActivity(intent);
+        } else if (id == R.id.btn_publish_dynamic) {
+            publishDynamic();
+        } else if (id == R.id.btn_go_to_management) {
+            Intent intent = new Intent(ChatActivity.this, PersonaManagementActivity.class);
+            startActivity(intent);
+        }
+    }
+}
