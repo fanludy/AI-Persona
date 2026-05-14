@@ -23,6 +23,9 @@ import com.example.demo.data.Persona;
 import com.example.demo.viewmodel.PersonaChatViewModel;
 import com.bumptech.glide.Glide;
 import android.media.MediaPlayer;
+
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 
 import java.util.List;
@@ -117,27 +120,78 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
     /**
      * 播放指定 URL 的音频文件
      */
+    // ChatActivity.java 中的修改
     private void playAudio(String audioUrl) {
-        try {
-            if (mediaPlayer.isPlaying()) {
-                mediaPlayer.stop();
+        if (audioUrl == null || audioUrl.isEmpty()) return;
+
+        // 1. 规范化 URL
+        final String secureUrl = audioUrl.startsWith("http://") ?
+                audioUrl.replace("http://", "https://") : audioUrl;
+
+        // 2. 清理逻辑：删除之前的临时音频文件
+        File cacheDir = getCacheDir();
+        File[] oldFiles = cacheDir.listFiles((dir, name) -> name.startsWith("tts_cache") && name.endsWith(".wav"));
+        if (oldFiles != null) {
+            for (File oldFile : oldFiles) {
+                boolean deleted = oldFile.delete();
+                Log.d(TAG, "清理旧音频文件: " + oldFile.getName() + " -> " + deleted);
             }
-            mediaPlayer.reset();
-
-            mediaPlayer.setDataSource(audioUrl);
-
-            mediaPlayer.prepareAsync(); // 异步准备
-
-            mediaPlayer.setOnPreparedListener(mp -> {
-                mp.start();
-                viewModel.setSpeakingStatus(true);
-            });
-
-        } catch (IOException e) {
-            Log.e(TAG, "播放 TTS 音频文件失败: " + e.getMessage());
-            Toast.makeText(this, "播放语音失败", Toast.LENGTH_SHORT).show();
-            viewModel.setSpeakingStatus(false);
         }
+
+        // 3. 使用 OkHttp 下载
+        okhttp3.Request request = new okhttp3.Request.Builder().url(secureUrl).build();
+        new okhttp3.OkHttpClient().newCall(request).enqueue(new okhttp3.Callback() {
+            @Override
+            public void onFailure(@NonNull okhttp3.Call call, @NonNull IOException e) {
+                Log.e(TAG, "下载音频失败: " + e.getMessage());
+            }
+
+            @Override
+            public void onResponse(@NonNull okhttp3.Call call, @NonNull okhttp3.Response response) throws IOException {
+                if (!response.isSuccessful() || response.body() == null) return;
+
+                try {
+                    // 4. 创建新的临时文件
+                    final File tempFile = File.createTempFile("tts_cache", ".wav", getCacheDir());
+                    try (java.io.FileOutputStream fos = new java.io.FileOutputStream(tempFile)) {
+                        fos.write(response.body().bytes());
+                    }
+
+                    runOnUiThread(() -> {
+                        try {
+                            if (mediaPlayer == null) mediaPlayer = new MediaPlayer();
+                            mediaPlayer.reset();
+
+                            // 5. 播放文件描述符
+                            FileInputStream fis = new FileInputStream(tempFile);
+                            mediaPlayer.setDataSource(fis.getFD());
+
+                            mediaPlayer.prepareAsync();
+                            mediaPlayer.setOnPreparedListener(mp -> {
+                                mp.start();
+                                viewModel.setSpeakingStatus(true);
+                                try { fis.close(); } catch (IOException ignored) {}
+                            });
+
+                            // 6. 播放完成后立即尝试删除当前文件（可选，或者留给下次播放前清理）
+                            mediaPlayer.setOnCompletionListener(mp -> {
+                                viewModel.setSpeakingStatus(false);
+                                if (tempFile.exists()) {
+                                    tempFile.delete();
+                                    Log.d(TAG, "播放完成，已删除当前临时文件");
+                                }
+                            });
+
+                        } catch (Exception e) {
+                            Log.e(TAG, "MediaPlayer 播放出错: " + e.getMessage());
+                        }
+                    });
+
+                } catch (Exception e) {
+                    Log.e(TAG, "处理音频文件出错: " + e.getMessage());
+                }
+            }
+        });
     }
 
     /**

@@ -1,6 +1,9 @@
 package com.example.demo.viewmodel;
 
 import android.app.Application;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.net.Uri;
 import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.lifecycle.AndroidViewModel;
@@ -56,12 +59,15 @@ public class PersonaChatViewModel extends AndroidViewModel {
 
     private static final String TAG = "PersonaChatViewModel";
 
-    private final String QWEN_API_KEY = "sk-08d5246bd6dc42d6ba075f8e2de2990b";
+    private final String QWEN_API_KEY = "sk-c5677a8b2c77473fab746ba32308bf10";
     private final String QWEN_CHAT_COMPLETION_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
     private final String TONGLYI_WANXIANG_IMAGE_GENERATION_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis";
-    private final String TONGLYI_WANXIANG_API_KEY ="sk-08d5246bd6dc42d6ba075f8e2de2990b";
+    private final String TONGLYI_WANXIANG_API_KEY ="sk-c5677a8b2c77473fab746ba32308bf10";
     private final String TONGYI_TTS_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
-    private final String TONGYI_TTS_API_KEY = "sk-08d5246bd6dc42d6ba075f8e2de2990b";
+    private final String TONGYI_TTS_API_KEY = "sk-c5677a8b2c77473fab746ba32308bf10";
+
+    private final String QWEN_MODEL = "qwen-plus";//对话模型
+
     private final OkHttpClient httpClient;
 
     public PersonaChatViewModel(@NonNull Application application) {
@@ -365,6 +371,10 @@ public class PersonaChatViewModel extends AndroidViewModel {
      * 调用通义 TTS API 生成语音 URL，并通知 UI 播放。
      * @param text 要合成的文本
      */
+    /**
+     * 调用通义 TTS API 生成语音 URL，并通知 UI 播放。
+     * @param text 要合成的文本
+     */
     public void synthesizeAndPlay(String text) {
         //获取当前活跃的 Persona 实例，检查输入文本是否为空或 Persona 是否存在
         final Persona currentPersona = activePersonaLiveData.getValue();
@@ -481,7 +491,7 @@ public class PersonaChatViewModel extends AndroidViewModel {
 
         JSONObject requestBodyJson = new JSONObject();
         try {
-            requestBodyJson.put("model", "qwen-turbo");// 指定使用的 AI 模型
+            requestBodyJson.put("model", QWEN_MODEL);// 指定使用的 AI 模型
 
             JSONArray messagesArray = new JSONArray();
 
@@ -585,7 +595,7 @@ public class PersonaChatViewModel extends AndroidViewModel {
         //构建请求体 JSON
         JSONObject requestBodyJson = new JSONObject();
         try {
-            requestBodyJson.put("model", "qwen-turbo");
+            requestBodyJson.put("model", QWEN_MODEL);
 
             JSONArray messagesArray = new JSONArray();
 
@@ -760,7 +770,7 @@ public class PersonaChatViewModel extends AndroidViewModel {
 
         JSONObject requestBodyJson = new JSONObject();
         try {
-            requestBodyJson.put("model", "qwen-turbo");
+            requestBodyJson.put("model", QWEN_MODEL);
             requestBodyJson.put("stream", true); //开启流式输出
 
             //将系统提示词包装为 system 角色的消息，放入请求的消息列表中
@@ -851,6 +861,15 @@ public class PersonaChatViewModel extends AndroidViewModel {
                     if (!fullResponse.isEmpty()) {
                         Message aiMessage = new Message(persona.getId(), fullResponse, false, persona.getName());
                         repository.insert(aiMessage);
+//
+//                        // 核心修改：利用正则表达式去掉 Markdown 符号（星号、井号、列表符号）
+//                        String rawText = fullResponse; // AI 返回的原始带 Markdown 的字符串
+//                        String cleanText = rawText.replaceAll("\\*\\*", "") // 去除粗体 **
+//                                .replaceAll("- ", "")     // 去除列表横杠
+//                                .replaceAll("#", "")      // 去除标题 #
+//                                .trim();
+//
+//                        synthesizeAndPlay(cleanText);
                     }
 
                 } catch (IOException e) {
