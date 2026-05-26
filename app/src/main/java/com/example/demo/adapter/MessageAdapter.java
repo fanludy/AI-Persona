@@ -235,21 +235,29 @@ public class MessageAdapter extends RecyclerView.Adapter<MessageAdapter.MessageV
         int lastIndex = messages.size() - 1;
         Message lastMessage = messages.get(lastIndex);
 
-        // 确保最后一条是 AI 的消息才更新
         if (!lastMessage.isUser()) {
             String currentText = lastMessage.getText();
 
-            // 💡 完美体验修复：当第一个字打出来时，瞬间擦除“正在思考...”的占位符
-            if ("正在思考...".equals(currentText)) {
+            // 💡 升级擦除逻辑：如果是初始占位符或者带有动作图标的状态文本，第一个字出来时直接覆盖擦除
+            if ("正在思考...".equals(currentText) || currentText.startsWith("💻") || currentText.startsWith("🎨") || currentText.startsWith("🔍")) {
                 lastMessage.setText(newText);
             } else {
-                // 后续字继续执行追加
                 lastMessage.setText(currentText + newText);
             }
-
-            // 告诉 RecyclerView 这一行有更新
             notifyItemChanged(lastIndex);
         }
     }
 
+    /**
+     * 💡 新增：不刷新全屏，直接精准重写最后一条等待气泡的文字内容
+     */
+    public void changePlaceholderText(String text) {
+        if (messages == null || messages.isEmpty()) return;
+        int lastIndex = messages.size() - 1;
+        Message lastMessage = messages.get(lastIndex);
+        if (!lastMessage.isUser()) {
+            lastMessage.setText(text);
+            notifyItemChanged(lastIndex); // 局部高频重绘，不闪烁
+        }
+    }
 }

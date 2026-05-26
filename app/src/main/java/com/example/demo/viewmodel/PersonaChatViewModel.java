@@ -154,6 +154,13 @@ public class PersonaChatViewModel extends AndroidViewModel {
         return currentStreamingText;
     }
 
+    // 💡 新增：用于向前台动态同步 Agent 当前动作状态的 LiveData
+    private final MutableLiveData<String> agentStatusText = new MutableLiveData<>();
+
+    public LiveData<String> getAgentStatusText() {
+        return agentStatusText;
+    }
+
     public void deleteDocument(int personaId, String docName) {
         repository.deleteDocument(personaId, docName);
     }
@@ -847,10 +854,11 @@ public class PersonaChatViewModel extends AndroidViewModel {
                         .append("1. 日常闲聊（如问候、天气）：保持沉浸感，用第一人称简短、口语化回复。绝对不要提“作为一个AI”。\n")
                         .append("2. 专业/事实问题：遇到询问具体知识时，调用 search_local_docs 工具进行资料检索。\n")
                         .append("3. 绘画/视觉请求：当用户想要看图片、要求画画时，调用 generate_image 工具。\n")
-                        // 💡 告诉 Agent 它有记事本了！
-                        .append("4. 日程管理：当用户要求你记录任务、安排日程或查询待办时，【必须】调用 add_todo 或 query_todos 工具。\n")
-                        // 💡 原封不动保留的高速通道，绝不影响闲聊速度！
-                        .append("5. 日常闲聊高速通道：如果用户的输入不需要调用上述任何工具，请你【必须且只能】回复字母：『PASS』，绝对不要生成任何实际回复！\n")
+                        .append("4. 日程管理：当用户要求记录任务或查询待办时，调用 add_todo 或 query_todos 工具。\n")
+                        // 💡 新增：告诉它遇到算术和逻辑问题时，用代码解决！
+                        .append("5. 计算与分析：当用户要求计算复杂数学公式、分析数据流时，【必须】调用 python_interpreter 工具写代码解决。\n")
+                        // 💡 绝对不能丢的极速通道，保证闲聊秒回！
+                        .append("6. 日常闲聊高速通道：如果用户的输入不需要调用上述任何工具，请你【必须且只能】回复字母：『PASS』，绝对不要生成任何实际回复！\n")
                         .append("请严格判断应回复 PASS 还是调用合适的工具。");
 
                 JSONObject systemMsg = new JSONObject();
@@ -970,10 +978,7 @@ public class PersonaChatViewModel extends AndroidViewModel {
                         else if ("generate_image".equals(functionName)) {
                             // ===== 触发画图工具 =====
                             String imagePrompt = argsObj.optString("image_prompt", message);
-                            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                                Message loadingMsg = new Message(persona.getId(), "🎨 正在为你绘制图像，请稍候...", false, persona.getName());
-                                repository.insert(loadingMsg);
-                            });
+                            agentStatusText.postValue("🎨 正在为你绘制图像，请稍候...");
                             generateImageRequest(imagePrompt, persona);
                         }
                         else if ("add_todo".equals(functionName)) {
@@ -1046,6 +1051,42 @@ public class PersonaChatViewModel extends AndroidViewModel {
                             StringBuilder sbAgentPrompt = new StringBuilder();
                             sbAgentPrompt.append("你现在的身份是 \"").append(persona.getName()).append("\"。刚才你调用了查询待办工具，拿到了系统返回的日程数据。\n")
                                     .append("请使用符合你人设的语气，自然地向用户播报这些任务。如果没有任务，可以顺势夸奖用户效率高。\n\n");
+
+                            List<Message> mockHistory = new ArrayList<>();
+                            for (int k = 1; k < followUpMessages.length(); k++) {
+                                JSONObject m = followUpMessages.getJSONObject(k);
+                                boolean isUserRole = "user".equals(m.optString("role"));
+                                mockHistory.add(new Message(persona.getId(), m.has("content") ? m.getString("content") : m.toString(), isUserRole, isUserRole ? "用户" : persona.getName()));
+                            }
+                            sendStreamingAiRequestWithCustomSystem(mockHistory, persona, sbAgentPrompt.toString());
+                        }
+                        else if ("python_interpreter".equals(functionName)) {
+                            // ===== 触发代码沙盒与数据计算 =====
+                            String script = argsObj.optString("script", "");
+                            Log.i(TAG, "Agent 编写了 Python 脚本准备计算:\n" + script);
+
+                            agentStatusText.postValue("💻 正在沙盒中执行计算，请稍候...");
+
+                            // 2. 模拟沙盒执行（未来你可以将 script 发送到你的 Spring Boot 后端进行真实计算并返回结果）
+                            // 这里我们先做一个前端模拟拦截，让 Agent 把生成的代码原样解释给用户听
+                            String executionResult = "【沙盒模拟返回】代码已成功运行。\n生成的脚本如下：\n```python\n" + script + "\n```\n(注：真实执行需接入后端计算节点)";
+
+                            // 3. 将执行结果塞回给大模型
+                            JSONArray followUpMessages = new JSONArray();
+                            followUpMessages.put(systemMsg);
+                            followUpMessages.put(userMsg);
+                            followUpMessages.put(responseMessage);
+                            JSONObject toolResultMsg = new JSONObject();
+                            toolResultMsg.put("role", "tool");
+                            toolResultMsg.put("name", "python_interpreter");
+                            toolResultMsg.put("tool_call_id", callId);
+                            toolResultMsg.put("content", executionResult);
+                            followUpMessages.put(toolResultMsg);
+
+                            // 4. 复用丝滑的流式打字机进行播报
+                            StringBuilder sbAgentPrompt = new StringBuilder();
+                            sbAgentPrompt.append("你现在的身份是 \"").append(persona.getName()).append("\"。刚才你编写了 Python 代码并在沙盒中运行了。\n")
+                                    .append("请使用符合你人设的语气，把代码逻辑和执行结果自然地告诉用户。\n\n");
 
                             List<Message> mockHistory = new ArrayList<>();
                             for (int k = 1; k < followUpMessages.length(); k++) {
@@ -1647,6 +1688,29 @@ public class PersonaChatViewModel extends AndroidViewModel {
             queryTodoFunc.put("parameters", queryTodoParams);
             queryTodoTool.put("function", queryTodoFunc);
             toolsArray.put(queryTodoTool);
+
+            // ==========================================
+            // 工具 5：代码沙盒与数据计算器 (python_interpreter)
+            // ==========================================
+            JSONObject pythonTool = new JSONObject();
+            pythonTool.put("type", "function");
+            JSONObject pythonFunc = new JSONObject();
+            pythonFunc.put("name", "python_interpreter");
+            pythonFunc.put("description", "当用户要求你进行复杂的数学计算、数据分析、或者编写并运行代码来解决问题时，必须调用此工具生成代码。");
+            JSONObject pythonParams = new JSONObject();
+            pythonParams.put("type", "object");
+            JSONObject pythonProps = new JSONObject();
+
+            JSONObject scriptProp = new JSONObject();
+            scriptProp.put("type", "string");
+            scriptProp.put("description", "需要执行的 Python 3 脚本代码，用于解决用户的计算或分析需求。");
+            pythonProps.put("script", scriptProp);
+
+            pythonParams.put("properties", pythonProps);
+            pythonParams.put("required", new JSONArray().put("script"));
+            pythonFunc.put("parameters", pythonParams);
+            pythonTool.put("function", pythonFunc);
+            toolsArray.put(pythonTool);
         } catch (JSONException e) {
             Log.e(TAG, "构建工具箱 JSON 失败", e);
         }

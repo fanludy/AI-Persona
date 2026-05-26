@@ -324,6 +324,14 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
                 recyclerView.scrollToPosition(adapter.getItemCount() - 1);
             }
         });
+
+        // 3. 💡 新增：监听 Agent 动作状态的实时流转
+        viewModel.getAgentStatusText().observe(this, status -> {
+            if (status != null && !status.isEmpty()) {
+                // 瞬间让屏幕上的“正在思考...”变成最新的动作提示，不经过数据库，绕过拦截！
+                adapter.changePlaceholderText(status);
+            }
+        });
     }
 
     /**
