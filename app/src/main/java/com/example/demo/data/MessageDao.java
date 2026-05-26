@@ -46,4 +46,8 @@ public interface MessageDao {
      */
     @Query("SELECT * FROM message_table WHERE personaId = :personaId ORDER BY id ASC") // 修正为按 id 排序
     List<Message> getMessagesByPersonaIdSync(int personaId);
+
+    // 查出某个角色名下，排除掉占位符（id=-1）的最近几条历史消息，并按时间正序排列（旧消息在前，新消息在后）
+    @Query("SELECT * FROM (SELECT * FROM message_table WHERE personaId = :personaId AND id != -1 ORDER BY id DESC LIMIT :limit) ORDER BY id ASC")
+    List<Message> getRecentMessagesSync(int personaId, int limit);
 }

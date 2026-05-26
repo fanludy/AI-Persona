@@ -16,6 +16,8 @@ import com.example.demo.data.Dynamic;
 import com.example.demo.data.DynamicDao;
 import com.example.demo.data.Message;
 import com.example.demo.data.MessageDao;
+import com.example.demo.data.KnowledgeChunk;
+import com.example.demo.data.KnowledgeChunkDao;
 
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -31,10 +33,18 @@ public class PersonaRepository {
     private final MessageDao messageDao;
     private final ExecutorService executorService; // 保持为单线程执行器
 
+    private final KnowledgeChunkDao knowledgeChunkDao; // 2. 新增变量
+
     private static volatile AppDatabase INSTANCE;
     private final LiveData<Persona> activePersonaLiveData;
     private final LiveData<List<Persona>> allPersonasLiveData;
     private final LiveData<List<Dynamic>> allDynamicsLiveData;
+    /**
+     * 【同步查询】获取最新几条历史消息，赋予 Agent 短期记忆
+     */
+    public List<Message> getRecentMessagesSync(int personaId, int limit) {
+        return messageDao.getRecentMessagesSync(personaId, limit);
+    }
 
     public static AppDatabase getDatabase(final Application application) {
         if (INSTANCE == null) {
@@ -65,6 +75,7 @@ public class PersonaRepository {
         personaDao = db.personaDao();
         dynamicDao = db.dynamicDao();
         messageDao = db.messageDao();
+        knowledgeChunkDao = db.knowledgeChunkDao();
 
         executorService = Executors.newSingleThreadExecutor();
 
@@ -78,6 +89,11 @@ public class PersonaRepository {
     public LiveData<List<Dynamic>> getAllDynamicsLiveData() { return allDynamicsLiveData; }
     public LiveData<List<Message>> getMessagesByPersonaId(int personaId) { return messageDao.getMessagesByPersonaId(personaId); }
     public ExecutorService getExecutorService() { return executorService; }
+
+
+    public LiveData<List<com.example.demo.data.PersonaDocument>> getAllPersonaDocumentsLiveData() {
+        return knowledgeChunkDao.getAllPersonaDocumentsLiveData();
+    }
 
     /**
      * 【同步】获取指定 Persona 的所有消息历史。
@@ -138,6 +154,21 @@ public class PersonaRepository {
             personaDao.disableAllPersonas();
 
             personaDao.activatePersonaQuery(personaId);
+        });
+    }
+
+    // 4. 新增两个代理方法 (供 ViewModel 调用)
+    public void insertKnowledgeChunk(KnowledgeChunk chunk) {
+        executorService.execute(() -> knowledgeChunkDao.insert(chunk));
+    }
+
+    public List<KnowledgeChunk> getKnowledgeChunksSync(int personaId) {
+        return knowledgeChunkDao.getChunksByPersonaIdSync(personaId);
+    }
+
+    public void deleteDocument(int personaId, String docName) {
+        executorService.execute(() -> {
+            knowledgeChunkDao.deleteChunksByDocName(personaId, docName);
         });
     }
 }

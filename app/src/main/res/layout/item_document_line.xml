@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingVertical="4dp"
+    android:paddingHorizontal="8dp"
+    android:background="#F5F5F5"
+    android:layout_marginTop="2dp">
+
+    <ImageView
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:src="@android:drawable/ic_menu_info_details"
+        app:tint="#757575"/>
+
+    <TextView
+        android:id="@+id/tv_doc_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginStart="8dp"
+        android:textSize="13sp"
+        android:textColor="#424242"
+        android:singleLine="true"
+        android:ellipsize="end"
+        android:text="文档名称.txt" />
+
+    <ImageButton
+        android:id="@+id/btn_delete_doc"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:src="@android:drawable/ic_menu_close_clear_cancel"
+        app:tint="#EF5350"
+        android:contentDescription="删除该文档"/>
+</LinearLayout>

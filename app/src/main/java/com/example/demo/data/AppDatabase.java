@@ -4,6 +4,7 @@ import android.content.Context;
 import androidx.room.Database;
 import androidx.room.Room;
 import androidx.room.RoomDatabase;
+import androidx.room.TypeConverters;
 
 import com.example.demo.data.Persona;
 import com.example.demo.data.PersonaDao;
@@ -16,12 +17,15 @@ import com.example.demo.data.MessageDao;
 /**
  * AppDatabase 是 Room 数据库的抽象类入口
  */
-@Database(entities = {Persona.class, Dynamic.class, Message.class}, version = 9, exportSchema = false)
+@Database(entities = {Persona.class, Dynamic.class, Message.class, KnowledgeChunk.class}, version = 3, exportSchema = false)
+@TypeConverters({VectorConverters.class}) // 3. 挂载转换器
 public abstract class AppDatabase extends RoomDatabase {
 
     public abstract PersonaDao personaDao();
     public abstract DynamicDao dynamicDao();
     public abstract MessageDao messageDao();
+
+    public abstract KnowledgeChunkDao knowledgeChunkDao();
 
     private static volatile AppDatabase INSTANCE;
     private static final String DATABASE_NAME = "persona_social_db";

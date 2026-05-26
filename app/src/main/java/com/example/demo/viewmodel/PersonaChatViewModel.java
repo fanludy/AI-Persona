@@ -11,6 +11,19 @@ import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.Transformations;
 
+import android.content.Context;
+import android.net.Uri;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader;
+import com.tom_roush.pdfbox.pdmodel.PDDocument;
+import com.tom_roush.pdfbox.text.PDFTextStripper;
+import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+
+import com.example.demo.data.KnowledgeChunk;
 import com.example.demo.data.Persona;
 import com.example.demo.data.Message;
 import com.example.demo.data.Dynamic;
@@ -66,6 +79,8 @@ public class PersonaChatViewModel extends AndroidViewModel {
     private final String TONGYI_TTS_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
     private final String TONGYI_TTS_API_KEY = "sk-c5677a8b2c77473fab746ba32308bf10";
 
+    private final String QWEN_EMBEDDING_URL = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding";
+
     private final String QWEN_MODEL = "qwen-plus";//对话模型
 
     private final OkHttpClient httpClient;
@@ -90,7 +105,12 @@ public class PersonaChatViewModel extends AndroidViewModel {
                 }
         );
 
-        httpClient = new OkHttpClient();
+        // 💡 针对大模型请求的特点，放宽网络超时限制
+        httpClient = new OkHttpClient.Builder()
+                .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS) // 连接超时：30秒
+                .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)   // 读取超时：120秒 (大模型生成文本和推理非常耗时)
+                .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)   // 写入超时：60秒
+                .build();
     }
 
     // --- Getter 和辅助方法 ---
@@ -116,8 +136,27 @@ public class PersonaChatViewModel extends AndroidViewModel {
         return isStreaming;
     }
 
+    // 供外部主线程立刻锁定打字状态，防止数据库抢跑
+    public void setChatStreaming(boolean isStreamingVal) {
+        isStreaming.setValue(isStreamingVal);
+    }
+
     public LiveData<String> getAudioFilePathLiveData() { return audioFilePathLiveData; }
     public LiveData<Boolean> getIsSpeakingLiveData() { return isSpeakingLiveData; }
+    public LiveData<List<com.example.demo.data.PersonaDocument>> getAllPersonaDocumentsLiveData() {
+        return repository.getAllPersonaDocumentsLiveData();
+    }
+
+    // 用于向 UI 实时发射流式打字机文本
+    private final MutableLiveData<String> currentStreamingText = new MutableLiveData<>();
+
+    public LiveData<String> getCurrentStreamingText() {
+        return currentStreamingText;
+    }
+
+    public void deleteDocument(int personaId, String docName) {
+        repository.deleteDocument(personaId, docName);
+    }
 
     /**
      * 重置图片 URL LiveData，防止重复处理
@@ -162,100 +201,181 @@ public class PersonaChatViewModel extends AndroidViewModel {
         repository.insert(message);
     }
 
+    /**
+     * 【同步调用】通义千问 Embedding API，将文本转为向量
+     */
+    private List<Double> getEmbeddingSync(String text) {
+        try {
+            JSONObject requestBodyJson = new JSONObject();
+            requestBodyJson.put("model", "text-embedding-v2");
+            JSONObject input = new JSONObject();
+            input.put("texts", new JSONArray().put(text));
+            requestBodyJson.put("input", input);
+
+            RequestBody requestBody = RequestBody.create(
+                    requestBodyJson.toString(),
+                    MediaType.get("application/json; charset=utf-8")
+            );
+
+            Request request = new Request.Builder()
+                    .url(QWEN_EMBEDDING_URL)
+                    .post(requestBody)
+                    .header("Authorization", "Bearer " + QWEN_API_KEY)
+                    .build();
+
+            // 注意：这里用 execute() 同步阻塞，因为我们将把它放在后台线程池运行
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (response.isSuccessful() && response.body() != null) {
+                    JSONObject resJson = new JSONObject(response.body().string());
+                    JSONArray embeddingsArray = resJson.optJSONObject("output")
+                            .optJSONArray("embeddings");
+                    if (embeddingsArray != null && embeddingsArray.length() > 0) {
+                        JSONArray vectorArray = embeddingsArray.getJSONObject(0).getJSONArray("embedding");
+                        List<Double> vector = new ArrayList<>();
+                        for (int i = 0; i < vectorArray.length(); i++) {
+                            vector.add(vectorArray.getDouble(i));
+                        }
+                        return vector;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "获取向量失败", e);
+        }
+        return null;
+    }
+
+    /**
+     * 计算两个向量的余弦相似度
+     */
+    private double calculateCosineSimilarity(List<Double> vectorA, List<Double> vectorB) {
+        if (vectorA == null || vectorB == null || vectorA.size() != vectorB.size()) return 0.0;
+        double dotProduct = 0.0, normA = 0.0, normB = 0.0;
+        for (int i = 0; i < vectorA.size(); i++) {
+            dotProduct += vectorA.get(i) * vectorB.get(i);
+            normA += Math.pow(vectorA.get(i), 2);
+            normB += Math.pow(vectorB.get(i), 2);
+        }
+        if (normA == 0.0 || normB == 0.0) return 0.0;
+        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+
     private static final long POLLING_INTERVAL_MS = 5000; // 轮询间隔 5 秒
 
     /**
-     * 轮询查询图片生成任务状态
+     * 轮询查询图片生成任务状态 (具备防网络抖动与超时熔断机制)
      */
     private void queryImageTask(String taskId, Persona persona) {
-        // 提交任务到后台线程池（单线程，确保顺序执行）
-        executorService.execute(() -> {
+        // 提交任务到后台线程池
+        repository.getExecutorService().execute(() -> {
             boolean keepPolling = true;
-            String status = "PENDING"; // 初始状态设为"等待中"
 
-            while (keepPolling) {
+            // 💡 改进 1：增加安全边界，防止无限死循环 (比如最多轮询 24 次，约 2 分钟)
+            int maxAttempts = 24;
+            int currentAttempt = 0;
+
+            // 💡 改进 2：容忍偶发的网络断流 (最多容忍连续 3 次网络错误)
+            int maxNetworkFailures = 3;
+            int networkFailureCount = 0;
+
+            while (keepPolling && currentAttempt < maxAttempts) {
                 try {
-                    // 非初始状态时，等待5秒再轮询（避免频繁请求）
-                    if (!status.equals("PENDING")) {
-                        Thread.sleep(POLLING_INTERVAL_MS);// POLLING_INTERVAL_MS = 5000（5秒）
-                    }
+                    // 💡 改进 3：无条件先休眠。因为任务刚提交，云端肯定需要几秒钟画图。
+                    Thread.sleep(POLLING_INTERVAL_MS);
+                    currentAttempt++;
 
-                    // 构建查询任务状态的API地址（基于任务ID）
                     String queryUrl = "https://dashscope.aliyuncs.com/api/v1/tasks/" + taskId;
-                    // 创建HTTP请求（带认证头）
                     Request request = new Request.Builder()
                             .url(queryUrl)
                             .header("Authorization", "Bearer " + TONGLYI_WANXIANG_API_KEY)
                             .build();
 
                     try (Response response = httpClient.newCall(request).execute()) {
-                        // 检查请求是否成功且响应体不为空
+                        // 如果网络请求成功打通，清零网络失败计数器
+                        networkFailureCount = 0;
+
                         if (!response.isSuccessful() || response.body() == null) {
                             String errorBody = response.body() != null ? response.body().string() : "N/A";
-                            Log.e(TAG, "图片查询 API 请求失败，代码: " + response.code() + ", 错误: " + errorBody);
-                            throw new IOException("图片查询 API 请求失败，代码: " + response.code());
+                            Log.e(TAG, "图片查询 API 返回异常状态码: " + response.code() + ", 详情: " + errorBody);
+                            // 这里不直接抛出异常终止，而是继续下一轮循环等恢复，除非达到了重试上限
+                            continue;
                         }
 
-                        // 解析响应JSON
                         String jsonString = response.body().string();
                         JSONObject responseJson = new JSONObject(jsonString);
-
-                        // 提取任务状态（从output字段中获取）
                         JSONObject output = responseJson.optJSONObject("output");
 
-                        if (output != null) {
-                            status = output.optString("task_status", "UNKNOWN");// 可能的值：PENDING/SUCCEEDED/FAILED/CANCELED
-                        } else {
-                            String errorCode = responseJson.optString("code", "UNKNOWN_ERROR");
-                            String errorMsg = responseJson.optString("message", "API 返回结构异常，无 Output 字段。");
-                            Log.e(TAG, "图片查询 API 返回异常，错误码: " + errorCode + ", 消息: " + errorMsg);
-                            throw new Exception("API 任务查询失败: " + errorMsg);
+                        if (output == null) {
+                            throw new JSONException("API 返回结构异常，无 Output 字段");
                         }
 
+                        String status = output.optString("task_status", "UNKNOWN");
+
                         if ("SUCCEEDED".equals(status)) {
-                            JSONArray results = output.optJSONArray("results");// 图片结果数组
-
-                            JSONObject input = responseJson.optJSONObject("input");
-                            String prompt = (input != null) ? input.optString("prompt", "图片") : "图片";
-
-                            // 解析图片URL（取第一个结果）
+                            JSONArray results = output.optJSONArray("results");
                             String imageUrl = "";
                             if (results != null && results.length() > 0) {
                                 imageUrl = results.getJSONObject(0).optString("url", "");
                             }
 
-                            // 图片URL有效时，通知UI更新
                             if (!imageUrl.isEmpty()) {
+                                // 成功拿到图片！
+                                // 注意：如果你希望这张图片像聊天记录一样保存在界面上，
+                                // 建议像处理报错消息那样，把它封装成 Message 写入 Room 数据库。
                                 generatedImageUrl.postValue(imageUrl);
                             } else {
-                                throw new JSONException("图片 URL 为空或解析失败。");
+                                throw new JSONException("返回状态成功，但图片 URL 解析为空");
                             }
-
-                            keepPolling = false;
+                            keepPolling = false; // 结束轮询
 
                         } else if ("FAILED".equals(status) || "CANCELED".equals(status)) {
                             Log.e(TAG, "图片任务失败或取消，状态: " + status);
-                            Message errorMessage = new Message(persona.getId(), "图片生成失败：任务状态为 " + status + "。", false, "系统");
+                            // 从响应中提取阿里云给出的具体失败原因（比如提示词违规）
+                            String failedReason = output.optString("code", status) + ": " + output.optString("message", "未知原因");
+                            Message errorMessage = new Message(persona.getId(), "图片生成失败：\n" + failedReason, false, "系统");
                             repository.insert(errorMessage);
                             keepPolling = false;
 
                         } else {
-                            Log.d(TAG, "图片任务状态: " + status + "，继续轮询。");
+                            // PENDING 或 RUNNING 状态，什么都不做，安心进入下一次 while 循环
+                            Log.d(TAG, "图片任务状态: " + status + "，正在尝试第 " + currentAttempt + " 次轮询。");
                         }
                     }
 
+                } catch (java.io.IOException e) {
+                    // 💡 针对网络异常 (如 Socket Closed, Timeout) 进行容错拦截
+                    networkFailureCount++;
+                    Log.w(TAG, "轮询图片时发生网络异常 (已累计 " + networkFailureCount + " 次): " + e.getMessage());
+
+                    if (networkFailureCount >= maxNetworkFailures) {
+                        Log.e(TAG, "网络连接彻底断开，放弃轮询图片。");
+                        Message errorMessage = new Message(persona.getId(), "网络连接断开，无法获取图片结果，请检查网络。", false, "系统");
+                        repository.insert(errorMessage);
+                        keepPolling = false;
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     Log.e(TAG, "图片查询轮询被中断", e);
                     keepPolling = false;
                 } catch (Exception e) {
-                    Log.e(TAG, "图片查询请求或解析异常: " + e.getMessage(), e);
-                    Message errorMessage = new Message(persona.getId(), "图片生成失败：查询异常或 API 返回错误。", false, "系统");
+                    // JSON 解析等其他硬性错误，直接放弃
+                    Log.e(TAG, "图片查询解析异常: " + e.getMessage(), e);
+                    Message errorMessage = new Message(persona.getId(), "图片数据解析失败。", false, "系统");
                     repository.insert(errorMessage);
                     keepPolling = false;
                 }
             }
-            isGeneratingImage.postValue(false);// 通知UI：生成结束
+
+            // 💡 改进 4：超时兜底
+            if (keepPolling && currentAttempt >= maxAttempts) {
+                Log.e(TAG, "图片生成等待超时");
+                Message errorMessage = new Message(persona.getId(), "大模型画图太慢，等待超时了，请稍后再试。", false, "系统");
+                repository.insert(errorMessage);
+            }
+
+            // 最终无论成功失败，关闭 UI 加载动画
+            isGeneratingImage.postValue(false);
         });
     }
 
@@ -687,69 +807,213 @@ public class PersonaChatViewModel extends AndroidViewModel {
      * 发送消息并切换为流式请求。
      */
     public void sendMessage(String message, Persona persona) {
-        if (persona == null) {
-            Log.e(TAG, "无法发送消息：当前没有活跃的 Persona。");
-            return;
-        }
+        if (persona == null || message == null || message.trim().isEmpty()) return;
 
-        //检测消息是否以 /imagine 开头（图片生成指令）
-        if (message.trim().toLowerCase().startsWith("/imagine ")) {
-            String prompt = message.trim().substring("/imagine ".length()).trim();
-
-            repository.getExecutorService().execute(() -> {
-                Message userCommandMessage = new Message(persona.getId(), message, true, "用户");
-                repository.insert(userCommandMessage);
-                generateImageRequest(prompt, persona); // 调用图片生成方法
-            });
-            return; // 阻止其进入正常的文本聊天流程
-        }
-
-        //若不是图片指令，则创建一条用户发送的文本消息
+        // 1. 瞬间上屏
         Message userMessage = new Message(persona.getId(), message, true, "用户");
+        repository.getExecutorService().execute(() -> repository.insert(userMessage));
 
+        // 2. 异步启动 Agent 决策链
         repository.getExecutorService().execute(() -> {
             try {
-                repository.insert(userMessage);//消息插入数据库
+                JSONObject probeBody = new JSONObject();
+                probeBody.put("model", QWEN_MODEL);
+                probeBody.put("stream", false);
+                probeBody.put("temperature", 0.1);
 
-                //调用仓库的同步方法 getMessageHistorySync 获取当前 Persona 的所有历史消息
-                List<Message> history = repository.getMessageHistorySync(persona.getId());
+                JSONArray messagesArray = new JSONArray();
 
-                if (history == null) history = new ArrayList<>();
+                // 💡 记忆组装 1：将【长期进化记忆】刻入潜意识
+                StringBuilder sbProbePrompt = new StringBuilder();
+                sbProbePrompt.append("你现在的身份是 \"").append(persona.getName())
+                        .append("\"，性格特点是：\"").append(persona.getPersonality())
+                        .append("\"，背景故事是：\"").append(persona.getBackground()).append("\"。\n\n");
 
-                history = new ArrayList<>(history);
+                sbProbePrompt.append("【你对该用户的长期记忆与历史了解】\n")
+                        .append(persona.getLongTermMemory()).append("\n\n");
 
-                if (!history.isEmpty()) {
-                    //若历史消息的最后一条是 AI 回复（非用户消息），则移除该消息，避免后续请求中重复发送 AI 自身的回复，防止重复生成
-                    Message lastMsgInDB = history.get(history.size() - 1);
-                    if (!lastMsgInDB.isUser()) {
-                        history.remove(history.size() - 1);
-                        Log.w(TAG, "Strict cleanup: Removed lingering assistant response from chat history to avoid repetition.");
+                sbProbePrompt.append("【输出格式约束】\n");
+                if (persona.isColloquialEnabled()) {
+                    sbProbePrompt.append("- 语气约束：请务必使用极其口语化、接地气的表达方式，多用简短对话，并且多加一些生动的 Emoji 表情（😊、🤔等）。\n");
+                }
+                if (persona.isWordLimitEnabled() && persona.getWordLimit() > 0) {
+                    sbProbePrompt.append("- 字数约束：你的回答必须极其精炼，废话少说，绝对不能超过 ").append(persona.getWordLimit()).append(" 个字！\n");
+                }
+                if (!persona.isColloquialEnabled() && !persona.isWordLimitEnabled()) {
+                    sbProbePrompt.append("- 无特殊字数和语气格式约束。\n");
+                }
+
+                sbProbePrompt.append("\n【智能体核心行为准则】\n")
+                        .append("1. 日常闲聊（如问候、天气）：保持沉浸感，用第一人称简短、口语化回复。绝对不要提“作为一个AI”或主动背诵你的职业背景。\n")
+                        .append("2. 专业/事实问题：遇到询问具体知识时，【必须且只能】调用 search_local_docs 工具进行资料检索。\n")
+                        .append("3. 绘画/视觉请求：当用户想要看图片、要求画画时，【必须】调用 generate_image 工具，将用户的需求转化为英文 prompt 发送，绝对不要自己用文字去描述画面。\n")
+                        // 💡 提速核心秘籍：强行截断探针的无效思考！
+                        .append("4. 日常闲聊高速通道：如果用户的输入不需要调用上述任何工具，请你【必须且只能】回复字母：『PASS』，绝对不要生成任何实际的聊天回复内容！\n")
+                        .append("请根据上下文和用户当前的话语，严格判断应回复 PASS 还是调用合适的工具。");
+
+                JSONObject systemMsg = new JSONObject();
+                systemMsg.put("role", "system");
+                systemMsg.put("content", sbProbePrompt.toString());
+                messagesArray.put(systemMsg);
+
+                // 💡 记忆组装 2：调取【短期滑动记忆】（最近6条=3轮交互），让AI拥有连贯上下文
+                List<Message> history = repository.getRecentMessagesSync(persona.getId(), 6);
+                if (history != null) {
+                    for (Message msg : history) {
+                        JSONObject histMsg = new JSONObject();
+                        histMsg.put("role", msg.isUser() ? "user" : "assistant");
+                        histMsg.put("content", msg.getText());
+                        messagesArray.put(histMsg);
                     }
                 }
 
-                //检查历史消息的最后一条是否为当前发送的用户消息，若不是则手动添加，确保 AI 能获取到最新的用户输入。
-                boolean isUserMessageAlreadyAtEnd = !history.isEmpty() &&
-                        history.get(history.size() - 1).getText().equals(userMessage.getText()) &&
-                        history.get(history.size() - 1).isUser();
+                // 注入当前提问
+                JSONObject userMsg = new JSONObject();
+                userMsg.put("role", "user");
+                userMsg.put("content", message);
+                messagesArray.put(userMsg);
 
-                if (!isUserMessageAlreadyAtEnd) {
-                    history.add(userMessage);
-                    Log.d(TAG, "Forced addition of current user message to end of chat history.");
+                probeBody.put("messages", messagesArray);
+                probeBody.put("tools", buildAgentTools());
+
+                RequestBody body = RequestBody.create(probeBody.toString(), MediaType.get("application/json; charset=utf-8"));
+                Request request = new Request.Builder()
+                        .url(QWEN_CHAT_COMPLETION_URL)
+                        .post(body)
+                        .header("Authorization", "Bearer " + QWEN_API_KEY)
+                        .build();
+
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (!response.isSuccessful() || response.body() == null) {
+                        throw new IOException("探针请求失败，状态码: " + response.code());
+                    }
+
+                    JSONObject resJson = new JSONObject(response.body().string());
+                    JSONObject choice = resJson.getJSONArray("choices").getJSONObject(0);
+                    JSONObject responseMessage = choice.getJSONObject("message");
+
+                    if (responseMessage.has("tool_calls")) {
+                        JSONArray toolCalls = responseMessage.getJSONArray("tool_calls");
+                        JSONObject toolCall = toolCalls.getJSONObject(0);
+                        String callId = toolCall.getString("id");
+                        String functionName = toolCall.getJSONObject("function").getString("name");
+                        String argumentsStr = toolCall.getJSONObject("function").getString("arguments");
+                        JSONObject argsObj = new JSONObject(argumentsStr);
+
+                        if ("search_local_docs".equals(functionName)) {
+                            // ===== 触发知识库检索 =====
+                            String searchQuery = argsObj.optString("search_query", message);
+                            Log.i(TAG, "Agent 判定触发知识库！提取的搜索词为: " + searchQuery);
+
+                            List<Double> queryVector = getEmbeddingSync(searchQuery);
+                            String localContext = "没有在本地记忆库中找到相关的参考文档。";
+                            com.example.demo.data.KnowledgeChunk bestChunk = null;
+
+                            if (queryVector != null) {
+                                List<com.example.demo.data.KnowledgeChunk> allChunks = repository.getKnowledgeChunksSync(persona.getId());
+                                double maxSimilarity = -1.0;
+                                for (com.example.demo.data.KnowledgeChunk chunk : allChunks) {
+                                    double sim = calculateCosineSimilarity(queryVector, chunk.vector);
+                                    if (sim > maxSimilarity) {
+                                        maxSimilarity = sim;
+                                        bestChunk = chunk;
+                                    }
+                                }
+                                if (bestChunk != null && maxSimilarity > 0.35) {
+                                    localContext = bestChunk.textContent;
+                                }
+                            }
+
+                            JSONArray followUpMessages = new JSONArray();
+                            followUpMessages.put(systemMsg);
+
+                            // 💡 注意：为了节省 Token，RAG 时暂不注入历史闲聊，只保留最新提问
+                            followUpMessages.put(userMsg);
+                            followUpMessages.put(responseMessage);
+
+                            JSONObject toolResultMsg = new JSONObject();
+                            toolResultMsg.put("role", "tool");
+                            toolResultMsg.put("name", "search_local_docs");
+                            toolResultMsg.put("tool_call_id", callId);
+                            toolResultMsg.put("content", "这是从本地文档《" + (bestChunk != null ? bestChunk.docName : "未知") + "》中为您检索到的核心真实事实：\n" + localContext);
+                            followUpMessages.put(toolResultMsg);
+
+                            // 💡 记忆组装 3：即便查文档，也不能忘了【长期记忆】
+                            StringBuilder sbAgentPrompt = new StringBuilder();
+                            sbAgentPrompt.append("你必须严格基于给定的 [tool] 角色提供的事实内容，使用符合你本身人设(名称:").append(persona.getName())
+                                    .append(", 性格:").append(persona.getPersonality()).append(")的语气，提炼并回答用户的问题。如果内容中未提及，请委婉表达你不知道，绝不可胡编乱造。\n\n");
+
+                            sbAgentPrompt.append("【你对该用户的长期记忆与历史了解】\n")
+                                    .append(persona.getLongTermMemory()).append("\n\n");
+
+                            sbAgentPrompt.append("【必须严格遵守的高级输出约束】\n");
+                            if (persona.isColloquialEnabled()) {
+                                sbAgentPrompt.append("- 请务必用极其口语化、接地气的口吻组织语言，多用短句，且必须带有丰富的 Emoji 表情！\n");
+                            }
+                            if (persona.isWordLimitEnabled() && persona.getWordLimit() > 0) {
+                                sbAgentPrompt.append("- 你的提炼回答必须极度精炼，直接切入核心，总字数绝对不能超过 ").append(persona.getWordLimit()).append(" 个字！\n");
+                            }
+
+                            List<Message> mockHistory = new ArrayList<>();
+                            for (int k = 1; k < followUpMessages.length(); k++) { // 跳过 system
+                                JSONObject m = followUpMessages.getJSONObject(k);
+                                String textContent = m.has("content") ? m.getString("content") : m.toString();
+                                boolean isUserRole = "user".equals(m.optString("role"));
+                                mockHistory.add(new Message(persona.getId(), textContent, isUserRole, isUserRole ? "用户" : persona.getName()));
+                            }
+
+                            sendStreamingAiRequestWithCustomSystem(mockHistory, persona, sbAgentPrompt.toString());
+
+                        }
+                        else if ("generate_image".equals(functionName)) {
+                            // ===== 触发画图工具 =====
+                            String imagePrompt = argsObj.optString("image_prompt", message);
+                            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                Message loadingMsg = new Message(persona.getId(), "🎨 正在为你绘制图像，请稍候...", false, persona.getName());
+                                repository.insert(loadingMsg);
+                            });
+                            generateImageRequest(imagePrompt, persona);
+                        }
+                    } else {
+                        // ==========================================
+                        // 分支 3：未触发工具调用，大模型判定为日常轻松闲聊
+                        // ==========================================
+                        Log.i(TAG, "Agent 判定为日常闲聊，放弃探针结果，发起真实的流式请求...");
+
+                        // 重新组装专门用于流式闲聊的 System Prompt，带上长期记忆
+                        StringBuilder sbAgentPrompt = new StringBuilder();
+                        sbAgentPrompt.append("你现在的身份是 \"").append(persona.getName())
+                                .append("\"，性格特点是：\"").append(persona.getPersonality())
+                                .append("\"，背景故事是：\"").append(persona.getBackground()).append("\"。\n\n");
+
+                        sbAgentPrompt.append("【你对该用户的长期记忆与历史了解】\n")
+                                .append(persona.getLongTermMemory()).append("\n\n");
+
+                        sbAgentPrompt.append("【必须严格遵守的高级输出约束】\n");
+                        if (persona.isColloquialEnabled()) {
+                            sbAgentPrompt.append("- 请务必用极其口语化、接地气的口吻组织语言，多用短句，且必须带有丰富的 Emoji 表情！\n");
+                        }
+                        if (persona.isWordLimitEnabled() && persona.getWordLimit() > 0) {
+                            sbAgentPrompt.append("- 你的回答必须极其精炼，废话少说，绝对不能超过 ").append(persona.getWordLimit()).append(" 个字！\n");
+                        }
+
+                        // 构造发送给流式接口的历史记录（包含之前查出的近期历史 + 本次的新问题）
+                        List<Message> mockHistory = new ArrayList<>();
+                        if (history != null) {
+                            for (Message msg : history) {
+                                mockHistory.add(new Message(persona.getId(), msg.getText(), msg.isUser(), msg.isUser() ? "用户" : persona.getName()));
+                            }
+                        }
+                        // 追加当前的新问题
+                        mockHistory.add(new Message(persona.getId(), message, true, "用户"));
+
+                        // 💡 丢弃第一阶段探针的生硬结果，发起真实的云端流式请求！
+                        sendStreamingAiRequestWithCustomSystem(mockHistory, persona, sbAgentPrompt.toString());
+                    }
                 }
-
-                final int historyLimit = 1;
-
-                List<Message> chatHistory = history.subList(
-                        Math.max(0, history.size() - historyLimit),
-                        history.size()
-                );
-
-                //开启流式输出
-                isStreaming.postValue(true);
-                sendStreamingAiRequest(chatHistory, persona);
-
             } catch (Exception e) {
-                Log.e(TAG, "发送消息过程中发生错误: " + e.getMessage(), e);
+                Log.e(TAG, "Agent 链条推理执行失败", e);
+                repository.insert(new Message(persona.getId(), "网络迷路了，请稍后再试。", false, "系统"));
                 isStreaming.postValue(false);
             }
         });
@@ -892,5 +1156,376 @@ public class PersonaChatViewModel extends AndroidViewModel {
                 repository.insert(errorMessage);
             }
         });
+    }
+
+    /**
+     * 发起流式网络请求（专用于 Agent 模式，支持自定义 System Prompt 和历史伪造）
+     */
+    private void sendStreamingAiRequestWithCustomSystem(List<Message> history, Persona persona, String customSystemPrompt) {
+        currentStreamingText.postValue("");
+
+        try {
+            JSONObject requestBody = new JSONObject();
+            requestBody.put("model", QWEN_MODEL);
+            requestBody.put("stream", true);
+
+            JSONArray messagesArray = new JSONArray();
+
+            JSONObject systemMsg = new JSONObject();
+            systemMsg.put("role", "system");
+            systemMsg.put("content", customSystemPrompt);
+            messagesArray.put(systemMsg);
+
+            if (history != null) {
+                for (Message m : history) {
+                    JSONObject msg = new JSONObject();
+                    msg.put("role", m.isUser() ? "user" : "assistant");
+                    msg.put("content", m.getText());
+                    messagesArray.put(msg);
+                }
+            }
+            requestBody.put("messages", messagesArray);
+
+            RequestBody body = RequestBody.create(requestBody.toString(), MediaType.get("application/json; charset=utf-8"));
+            Request request = new Request.Builder()
+                    .url(QWEN_CHAT_COMPLETION_URL)
+                    .header("Authorization", "Bearer " + QWEN_API_KEY)
+                    .header("Accept", "text/event-stream")
+                    .post(body)
+                    .build();
+
+            // ==========================================
+            // 3. 处理流式返回 (完美照搬原版极致丝滑的打字机逻辑！)
+            // ==========================================
+            try (Response response = httpClient.newCall(request).execute()) {
+                if (!response.isSuccessful() || response.body() == null) {
+                    throw new IOException("API 流式请求失败，状态码: " + response.code());
+                }
+
+                String fullResponse = ""; // 恢复原版的拼接变量
+                try (okhttp3.ResponseBody responseBody = response.body()) {
+
+                    // 恢复原版的 BufferedReader 逐行读取机制
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(responseBody.byteStream()));
+                    String line;
+
+                    while ((line = reader.readLine()) != null) {
+                        if (line.startsWith("data:")) {
+                            String data = line.substring(5).trim();
+                            if (data.equals("[DONE]")) {
+                                break;
+                            }
+
+                            try {
+                                JSONObject jsonChunk = new JSONObject(data);
+                                JSONArray choices = jsonChunk.optJSONArray("choices");
+                                if (choices != null && choices.length() > 0) {
+                                    JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
+                                    if (delta != null && delta.has("content")) {
+                                        String contentChunk = delta.optString("content", "");
+
+                                        // 💡 完全使用你原版的增量更新策略！
+                                        if (!contentChunk.isEmpty()) {
+                                            fullResponse += contentChunk;
+
+                                            // 💡 修复断流：ChatActivity 监听的是 currentStreamingText，必须把碎片发给它！
+                                            currentStreamingText.postValue(contentChunk);
+                                            try {
+                                                Thread.sleep(50); // 恢复原版的 50ms 优雅延迟
+                                            } catch (InterruptedException e) {
+                                                Thread.currentThread().interrupt();
+                                                Log.e(TAG, "流式传输线程休眠时被中断", e);
+                                            }
+                                            // 触发 Adapter 里的状态重置
+                                            currentStreamingText.postValue(null);
+                                        }
+                                    }
+                                }
+                            } catch (JSONException e) {
+                                Log.e(TAG, "解析流式 JSON 块失败: " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+
+                // ==========================================
+                // 4. 流式彻底接收完毕！统一写入 Room 数据库
+                // ==========================================
+                String finalContent = fullResponse.trim();
+                if (!finalContent.isEmpty()) {
+                    Message aiMessage = new Message(persona.getId(), finalContent, false, persona.getName());
+                    repository.insert(aiMessage);
+
+                    // 💡 进化触发 2：完全保留新增的长期记忆萃取功能，丝毫不受影响！
+                    if (history != null && !history.isEmpty()) {
+                        String userQuestion = "";
+                        // 倒序查找最后一条属于用户的消息，作为提取记忆的 "最新提问"
+                        for (int i = history.size() - 1; i >= 0; i--) {
+                            if (history.get(i).isUser()) {
+                                userQuestion = history.get(i).getText();
+                                break;
+                            }
+                        }
+                        // 如果找到了用户的提问，启动后台潜意识萃取
+                        if (!userQuestion.isEmpty()) {
+                            extractAndEvolutionMemory(persona, userQuestion, finalContent);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "流式请求过程中发生异常", e);
+            repository.insert(new Message(persona.getId(), "抱歉，我的网络连接似乎断开了，没能把话说完。", false, "系统"));
+        } finally {
+            isStreaming.postValue(false);
+        }
+    }
+
+    /**
+     * 处理用户上传的文档：读取纯文本 -> 文本切片 -> 向量化 -> 存入 Room 数据库
+     */
+    /**
+     * 【全格式支持版】处理用户上传的文档：支持 TXT / PDF / DOCX
+     */
+    public void processAndSaveDocument(Uri documentUri, Persona persona, Context context) {
+        // 【关键初始化】如果你使用了 PDFBox，必须在使用前初始化它的资源加载器
+        PDFBoxResourceLoader.init(context);
+
+        repository.getExecutorService().execute(() -> {
+            try {
+                // 1. 获取真实文件名
+                String fileName = "未知文档.txt";
+                android.database.Cursor cursor = context.getContentResolver().query(documentUri, null, null, null, null);
+                if (cursor != null) {
+                    if (cursor.moveToFirst()) {
+                        int nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                        if (nameIndex != -1) {
+                            fileName = cursor.getString(nameIndex);
+                        }
+                    }
+                    cursor.close();
+                }
+
+                // 2. 根据文件后缀名，智能选择解析方案抽取纯文本
+                String fullText = "";
+                String lowerFileName = fileName.toLowerCase();
+                InputStream inputStream = context.getContentResolver().openInputStream(documentUri);
+
+                if (inputStream == null) {
+                    throw new Exception("无法读取文件内容");
+                }
+
+                if (lowerFileName.endsWith(".pdf")) {
+                    // 【解析 PDF】
+                    PDDocument document = PDDocument.load(inputStream);
+                    PDFTextStripper stripper = new PDFTextStripper();
+                    fullText = stripper.getText(document);
+                    document.close();
+
+                } else if (lowerFileName.endsWith(".docx")) {
+                    // 【解析 DOCX】
+                    XWPFDocument document = new XWPFDocument(inputStream);
+                    XWPFWordExtractor extractor = new XWPFWordExtractor(document);
+                    fullText = extractor.getText();
+                    extractor.close();
+
+                } else {
+                    // 【解析默认的 TXT 或其他文本】
+                    StringBuilder textBuilder = new StringBuilder();
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        textBuilder.append(line).append("\n");
+                    }
+                    fullText = textBuilder.toString();
+                }
+
+                inputStream.close(); // 统一关闭流
+
+                fullText = fullText.trim();
+                if (fullText.isEmpty()) {
+                    Log.e(TAG, "文档提取后内容为空，跳过处理");
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        android.widget.Toast.makeText(context, "文档似乎是空的或者全为图片，无法提取文字", android.widget.Toast.LENGTH_LONG).show();
+                    });
+                    return;
+                }
+
+                // 3. 文本滑动切片 (Chunking) - 与之前逻辑保持一致
+                int chunkSize = 300;
+                int overlap = 50;
+                List<String> chunks = new ArrayList<>();
+                int i = 0;
+                while (i < fullText.length()) {
+                    int end = Math.min(i + chunkSize, fullText.length());
+                    chunks.add(fullText.substring(i, end));
+                    if (end == fullText.length()) break;
+                    i += (chunkSize - overlap);
+                }
+
+                // 4. 遍历每个文本块，调用 Embedding API，存入数据库
+                int successCount = 0;
+                for (String chunkText : chunks) {
+                    List<Double> vector = getEmbeddingSync(chunkText);
+                    if (vector != null) {
+                        KnowledgeChunk chunkEntity = new KnowledgeChunk(persona.getId(), fileName, chunkText, vector);
+                        repository.insertKnowledgeChunk(chunkEntity);
+                        successCount++;
+                    } else {
+                        Thread.sleep(500); // 应对限流
+                    }
+                }
+
+                Log.i(TAG, "知识库文档吸收完毕！文件名：" + fileName + "，共保存了 " + successCount + " 个知识块。");
+
+                final String finalFileName = fileName;
+                final int finalSuccessCount = successCount;
+
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    android.widget.Toast.makeText(
+                            context,
+                            "上传成功！《" + finalFileName + "》已转化为 " + finalSuccessCount + " 个知识记忆",
+                            android.widget.Toast.LENGTH_LONG
+                    ).show();
+                });
+
+            } catch (Exception e) {
+                Log.e(TAG, "处理文档并保存时发生异常: " + e.getMessage(), e);
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    android.widget.Toast.makeText(context, "文档解析失败，可能是文件损坏或格式不受支持", android.widget.Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
+    }
+
+    /**
+     * 【新增】更新 Persona 的属性（比如开关 Markdown）
+     */
+    public void updatePersona(Persona persona) {
+        repository.getExecutorService().execute(() -> {
+            // 假设你的 PersonaRepository 里有 update 方法。
+            // 如果没有，直接用 repository.insert(persona) 通常也能覆盖更新（取决于你的 DAO 策略）
+            repository.update(persona);
+        });
+    }
+
+    /**
+     * 💡 【记忆进化引擎】异步无感萃取长期核心记忆，并增量更新到角色事实库中
+     */
+    private void extractAndEvolutionMemory(Persona persona, String userQuestion, String aiResponse) {
+        repository.getExecutorService().execute(() -> {
+            try {
+                JSONObject memoryBody = new JSONObject();
+                memoryBody.put("model", QWEN_MODEL);
+                memoryBody.put("stream", false);
+                memoryBody.put("temperature", 0.0); // 绝对理智，不瞎编
+
+                JSONArray messages = new JSONArray();
+
+                JSONObject systemRole = new JSONObject();
+                String extractionPrompt = "你是一个智能体后台潜意识记忆萃取器。\n" +
+                        "【⚠️ 实体防混淆警告】当前 AI 扮演的虚拟角色名字是『" + persona.getName() + "』。当用户的话语中出现这个名字时，是在呼唤 AI，绝对不是用户本人的名字！\n\n" +
+                        "请仔细阅读用户与AI的最新一轮对话，专门提炼出关于【用户本人】的长期核心静态事实（例如：用户的真实称呼、职业身份、正在研究的专业领域、明确表达的个人偏好、当前的长期核心任务等）。\n" +
+                        "【萃取要求】\n" +
+                        "1. 必须是长期的背景事实，绝对不要记录临时状态（如心情好、单纯的指令等）。\n" +
+                        "2. 归纳语言必须极其精炼，用分号隔开，只提炼新出现的事实。\n" +
+                        "3. 如果这段对话里完全没有提及任何关于【用户自身】的新硬核信息，你必须且只能回复两个字：\"无\"。";
+
+                systemRole.put("role", "system");
+                systemRole.put("content", extractionPrompt);
+                messages.put(systemRole);
+
+                JSONObject userContext = new JSONObject();
+                userContext.put("role", "user");
+                userContext.put("content", "【最新交互记录】\n用户问: \"" + userQuestion + "\"\nAI答: \"" + aiResponse + "\"");
+                messages.put(userContext);
+                memoryBody.put("messages", messages);
+
+                RequestBody body = RequestBody.create(memoryBody.toString(), MediaType.get("application/json; charset=utf-8"));
+                Request request = new Request.Builder()
+                        .url(QWEN_CHAT_COMPLETION_URL)
+                        .post(body)
+                        .header("Authorization", "Bearer " + QWEN_API_KEY)
+                        .build();
+
+                try (Response response = httpClient.newCall(request).execute()) {
+                    if (response.isSuccessful() && response.body() != null) {
+                        JSONObject resJson = new JSONObject(response.body().string());
+                        String extractedInfo = resJson.getJSONArray("choices").getJSONObject(0)
+                                .getJSONObject("message").optString("content", "").trim();
+
+                        // 如果提炼出了新记忆，且大模型没有判定为“无”，执行进化融合
+                        if (!extractedInfo.isEmpty() && !extractedInfo.contains("无")) {
+                            Log.i(TAG, "🧠 长期记忆萃取成功！捕获到用户新事实: " + extractedInfo);
+
+                            String currentMemory = persona.getLongTermMemory();
+                            if (currentMemory == null || currentMemory.contains("暂无")) {
+                                currentMemory = "";
+                            }
+                            String evolvedMemory = currentMemory + (currentMemory.isEmpty() ? "" : "\n") + "- " + extractedInfo;
+                            persona.setLongTermMemory(evolvedMemory);
+
+                            updatePersona(persona); // 写入底层数据库，实现永久记忆
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "记忆进化引擎在后台开小差了", e);
+            }
+        });
+    }
+
+
+    /**
+     * 【新增】组装 Function Calling 工具箱声明的 JSON 数组
+     */
+    private JSONArray buildAgentTools() {
+        JSONArray toolsArray = new JSONArray();
+        try {
+            // ==========================================
+            // 工具 1：本地知识库检索 (search_local_docs)
+            // ==========================================
+            JSONObject docTool = new JSONObject();
+            docTool.put("type", "function");
+            JSONObject docFunc = new JSONObject();
+            docFunc.put("name", "search_local_docs");
+            docFunc.put("description", "当用户询问特定专业知识、查阅资料、或者问及你过去记忆库中可能存在的文档文件时，必须调用此工具进行本地检索。");
+            JSONObject docParams = new JSONObject();
+            docParams.put("type", "object");
+            JSONObject docProps = new JSONObject();
+            JSONObject queryProp = new JSONObject();
+            queryProp.put("type", "string");
+            queryProp.put("description", "用于在本地向量知识库中搜索的关键词或问题摘要");
+            docProps.put("search_query", queryProp);
+            docParams.put("properties", docProps);
+            docParams.put("required", new JSONArray().put("search_query"));
+            docFunc.put("parameters", docParams);
+            docTool.put("function", docFunc);
+            toolsArray.put(docTool);
+
+            // ==========================================
+            // 工具 2：AI 绘画生成 (generate_image)
+            // ==========================================
+            JSONObject drawTool = new JSONObject();
+            drawTool.put("type", "function");
+            JSONObject drawFunc = new JSONObject();
+            drawFunc.put("name", "generate_image");
+            drawFunc.put("description", "当用户明确要求画画、生成图片、或者需要视觉图像来展示某物时，必须调用此工具。");
+            JSONObject drawParams = new JSONObject();
+            drawParams.put("type", "object");
+            JSONObject drawProps = new JSONObject();
+            JSONObject promptProp = new JSONObject();
+            promptProp.put("type", "string");
+            promptProp.put("description", "提炼出的画面描述词(Prompt)。必须转换为英文，用于喂给文生图大模型，描述要尽可能详细且包含画风设定。");
+            drawProps.put("image_prompt", promptProp);
+            drawParams.put("properties", drawProps);
+            drawParams.put("required", new JSONArray().put("image_prompt"));
+            drawFunc.put("parameters", drawParams);
+            drawTool.put("function", drawFunc);
+            toolsArray.put(drawTool);
+        } catch (JSONException e) {
+            Log.e(TAG, "构建工具箱 JSON 失败", e);
+        }
+        return toolsArray;
     }
 }

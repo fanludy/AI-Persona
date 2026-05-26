@@ -21,6 +21,17 @@ public class Persona {
     private String background;//背景
     private String avatarUrl;//头像的url地址
     private boolean isActive = false;//标记当前角色是否启用
+    // 💡 新增：Markdown 渲染开关（默认设为 true）
+    private boolean isMarkdownEnabled = true;
+    // 💡 1. 字数限制开关
+    private boolean isWordLimitEnabled = false;
+    // 💡 2. 字数限制具体数量 (默认100字)
+    private int wordLimit = 100;
+    // 💡 3. 口语化表达开关
+    private boolean isColloquialEnabled = false;
+
+    // 💡 新增：随对话不断动态进化的长期记忆事实库
+    private String longTermMemory = "暂无对用户的长期了解背景。";
 
     /**
      * 主构造函数，用于 Room 实体创建。
@@ -71,4 +82,23 @@ public class Persona {
 
     public boolean isActive() { return isActive; }
     public void setActive(boolean active) { isActive = active; }
+
+    public boolean isMarkdownEnabled() {
+        return isMarkdownEnabled;
+    }
+
+    public void setMarkdownEnabled(boolean markdownEnabled) {
+        isMarkdownEnabled = markdownEnabled;
+    }
+    public boolean isWordLimitEnabled() { return isWordLimitEnabled; }
+    public void setWordLimitEnabled(boolean wordLimitEnabled) { isWordLimitEnabled = wordLimitEnabled; }
+
+    public int getWordLimit() { return wordLimit; }
+    public void setWordLimit(int wordLimit) { this.wordLimit = wordLimit; }
+
+    public boolean isColloquialEnabled() { return isColloquialEnabled; }
+    public void setColloquialEnabled(boolean colloquialEnabled) { isColloquialEnabled = colloquialEnabled; }
+
+    public String getLongTermMemory() { return longTermMemory; }
+    public void setLongTermMemory(String longTermMemory) { this.longTermMemory = longTermMemory; }
 }

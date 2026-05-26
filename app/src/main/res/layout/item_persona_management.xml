@@ -4,70 +4,198 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginHorizontal="8dp"
-    android:layout_marginVertical="4dp"
-    app:cardCornerRadius="8dp"
-    app:cardElevation="2dp">
+    android:layout_marginHorizontal="12dp"
+    android:layout_marginVertical="8dp"
+    app:cardCornerRadius="12dp"
+    app:cardElevation="4dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="12dp"
-        android:gravity="center_vertical">
+        android:orientation="vertical">
 
-        <ImageView
-            android:id="@+id/persona_avatar_management"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:src="@drawable/default_avatar"
-            android:scaleType="centerCrop"
-            android:layout_marginEnd="12dp"
-            android:contentDescription="Persona Avatar" />
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="16dp"
+            android:background="#FAFAFA">
+
+            <FrameLayout
+                android:id="@+id/avatar_container"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackgroundBorderless">
+
+                <ImageView
+                    android:id="@+id/persona_avatar_management"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:src="@drawable/default_avatar"
+                    android:scaleType="centerCrop" />
+
+                <ImageView
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:layout_gravity="bottom|end"
+                    android:background="@android:color/white"
+                    android:src="@android:drawable/ic_menu_edit"
+                    app:tint="#666666" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_marginEnd="8dp"
+                android:orientation="vertical"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toStartOf="@+id/btn_knowledge_base"
+                app:layout_constraintStart_toEndOf="@+id/avatar_container"
+                app:layout_constraintTop_toTopOf="parent">
+
+                <TextView
+                    android:id="@+id/persona_name_management"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textSize="18sp"
+                    android:textStyle="bold"
+                    android:textColor="#333333"
+                    tools:text="小红" />
+
+                <TextView
+                    android:id="@+id/persona_personality_management"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:textSize="13sp"
+                    android:textColor="#888888"
+                    android:maxLines="2"
+                    android:ellipsize="end"
+                    tools:text="严谨的 Java 后端开发工程师..." />
+            </LinearLayout>
+
+            <ImageButton
+                android:id="@+id/btn_knowledge_base"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_add"
+                android:contentDescription="添加知识文档"
+                app:layout_constraintEnd_toStartOf="@+id/btn_delete_persona"
+                app:layout_constraintTop_toTopOf="parent"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:tint="#4CAF50" />
+
+            <ImageButton
+                android:id="@+id/btn_delete_persona"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_marginStart="8dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_delete"
+                android:contentDescription="删除"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="parent"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:tint="#F44336" />
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#E0E0E0" />
+
+        <GridLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:columnCount="2"
+            android:padding="12dp">
+
+            <Switch
+                android:id="@+id/persona_active_switch"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_columnSpan="2"
+                android:layout_marginVertical="4dp"
+                android:text="激活该角色"
+                android:textStyle="bold"
+                android:textColor="#6200EE" />
+
+            <Switch
+                android:id="@+id/persona_colloquial_switch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_columnWeight="1"
+                android:layout_marginVertical="4dp"
+                android:layout_marginEnd="4dp"
+                android:text="口语化+Emoji" />
+
+            <Switch
+                android:id="@+id/persona_markdown_switch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_columnWeight="1"
+                android:layout_marginVertical="4dp"
+                android:layout_marginStart="4dp"
+                android:text="Markdown 渲染" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_columnSpan="2"
+                android:layout_marginVertical="4dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <Switch
+                    android:id="@+id/persona_word_limit_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="字数限制" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1" />
+
+                <EditText
+                    android:id="@+id/et_word_limit"
+                    android:layout_width="60dp"
+                    android:layout_height="32dp"
+                    android:background="@android:drawable/editbox_background_normal"
+                    android:gravity="center"
+                    android:inputType="number"
+                    android:maxLength="4"
+                    android:paddingHorizontal="8dp"
+                    android:textColor="#333333"
+                    android:textSize="13sp"
+                    android:visibility="gone"
+                    tools:text="100"
+                    tools:visibility="visible" />
+            </LinearLayout>
+
+        </GridLayout>
+
+        <View
+            android:id="@+id/doc_divider"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginHorizontal="12dp"
+            android:background="#EEEEEE"
+            android:visibility="gone"/>
 
         <LinearLayout
-            android:layout_width="0dp"
+            android:id="@+id/ll_documents_container"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/persona_name_management"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textSize="18sp"
-                android:textStyle="bold"
-                tools:text="Persona Name" />
-
-            <TextView
-                android:id="@+id/persona_personality_management"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textSize="14sp"
-                android:textColor="@android:color/darker_gray"
-                android:maxLines="1"
-                android:ellipsize="end"
-                tools:text="Persona Personality description..." />
-        </LinearLayout>
-
-        <Switch
-            android:id="@+id/persona_active_switch"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:textOff="禁用"
-            android:textOn="启用"
-            android:checked="false" />
-
-        <ImageButton
-            android:id="@+id/btn_delete_persona"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:layout_marginStart="8dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@drawable/ic_delete"
-            android:contentDescription="删除 Persona"
-            app:tint="@android:color/holo_red_dark" />
+            android:orientation="vertical"
+            android:paddingHorizontal="12dp"
+            android:paddingBottom="8dp"
+            android:visibility="gone" />
 
     </LinearLayout>
 </androidx.cardview.widget.CardView>

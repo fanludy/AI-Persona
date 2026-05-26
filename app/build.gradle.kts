@@ -85,6 +85,14 @@ dependencies {
     val glide_version = "4.16.0"
     implementation("com.github.bumptech.glide:glide:$glide_version")
     ksp("com.github.bumptech.glide:compiler:$glide_version")
+
+    implementation("com.google.code.gson:gson:2.10.1")
+
+    // 1. PDF 解析库 (TomRoush 移植的 Android 专用版 PDFBox)
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+
+    // 2. Word (DOCX) 解析库 (Apache POI)
+    implementation("org.apache.poi:poi-ooxml:5.2.3")
 }
 
 tasks.withType<KotlinCompile>().configureEach {

@@ -34,6 +34,16 @@ public class MessageAdapter extends RecyclerView.Adapter<MessageAdapter.MessageV
     private static final int VIEW_TYPE_PERSONA = 2;
     private static final int VIEW_TYPE_IMAGE = 3;
 
+    // 1. 新增一个全局状态变量
+    private boolean isMarkdownEnabled = true;
+
+    // 2. 提供一个给 ChatActivity 调用的设置方法
+    public void setMarkdownEnabled(boolean enabled) {
+        this.isMarkdownEnabled = enabled;
+        // 注意：这里如果发生切换，可以调用 notifyDataSetChanged() 刷新全局，
+        // 但通常我们是在进入聊天界面时就设置好的。
+    }
+
     public MessageAdapter(Context context, OnTtsClickListener listener) {
         this.markwon = Markwon.create(context);
         this.ttsClickListener = listener;
@@ -101,6 +111,13 @@ public class MessageAdapter extends RecyclerView.Adapter<MessageAdapter.MessageV
         } else if (holder.viewType == VIEW_TYPE_PERSONA) {
             // Persona 消息逻辑
             markwon.setMarkdown(holder.messageTextView, message.getText());
+
+            // 💡 4. 核心修改：根据开关决定如何渲染文本
+            if (isMarkdownEnabled) {
+                markwon.setMarkdown(holder.messageTextView, message.getText());
+            } else {
+                holder.messageTextView.setText(message.getText());
+            }
 
             if (holder.ttsButton != null && ttsClickListener != null) {
                 // 文本消息显示按钮
@@ -188,4 +205,51 @@ public class MessageAdapter extends RecyclerView.Adapter<MessageAdapter.MessageV
             notifyItemRemoved(position);
         }
     }
+
+    /**
+     * 【辅助方法 1】获取列表中的最后一条消息
+     */
+    public Message getLastMessage() {
+        if (messages != null && !messages.isEmpty()) {
+            return messages.get(messages.size() - 1);
+        }
+        return null;
+    }
+
+    /**
+     * 【辅助方法 2】手动插入一条临时消息，并触发顺滑的插入动画
+     */
+    public void addMessage(Message message) {
+        if (messages != null) {
+            messages.add(message);
+            notifyItemInserted(messages.size() - 1);
+        }
+    }
+
+    /**
+     * 【核心优化】专门用于流式打字机效果的局部刷新
+     */
+    public void updateStreamingText(String newText) {
+        if (messages == null || messages.isEmpty()) return;
+
+        int lastIndex = messages.size() - 1;
+        Message lastMessage = messages.get(lastIndex);
+
+        // 确保最后一条是 AI 的消息才更新
+        if (!lastMessage.isUser()) {
+            String currentText = lastMessage.getText();
+
+            // 💡 完美体验修复：当第一个字打出来时，瞬间擦除“正在思考...”的占位符
+            if ("正在思考...".equals(currentText)) {
+                lastMessage.setText(newText);
+            } else {
+                // 后续字继续执行追加
+                lastMessage.setText(currentText + newText);
+            }
+
+            // 告诉 RecyclerView 这一行有更新
+            notifyItemChanged(lastIndex);
+        }
+    }
+
 }

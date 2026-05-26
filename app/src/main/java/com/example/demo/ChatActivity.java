@@ -57,6 +57,7 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
 
     private Persona activePersona;// 当前活跃的角色
     private MediaPlayer mediaPlayer;// 音频播放器（用于TTS）
+    private List<Message> pendingMessages = null; // 💡【新增】用于缓存打字期间数据库的更新
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -235,8 +236,20 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
             }
         });
 
-        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        LinearLayoutManager layoutManager = new LinearLayoutManager(this);
+        // 💡 顺手优化：保证不管文本怎么变长，列表总是以底部为基准
+        layoutManager.setStackFromEnd(true);
+        recyclerView.setLayoutManager(layoutManager);
         recyclerView.setAdapter(adapter);
+
+        // ==========================================
+        // 💡 【彻底解决抖动和遮挡的核心代码】
+        // 关闭 RecyclerView 默认的局部刷新（Change）动画
+        // ==========================================
+        RecyclerView.ItemAnimator animator = recyclerView.getItemAnimator();
+        if (animator instanceof androidx.recyclerview.widget.SimpleItemAnimator) {
+            ((androidx.recyclerview.widget.SimpleItemAnimator) animator).setSupportsChangeAnimations(false);
+        }
     }
 
     /**
@@ -246,6 +259,12 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
         viewModel.getActivePersonaLiveData().observe(this, persona -> {
             if (persona != null) {
                 activePersona = persona;
+
+                // 💡 在这里把当前角色的 Markdown 偏好传递给适配器
+                if (adapter != null) {
+                    adapter.setMarkdownEnabled(persona.isMarkdownEnabled());
+                }
+
                 updatePersonaUI(persona);// 更新角色信息UI
             } else {
                 activePersona = null;
@@ -261,7 +280,12 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
      */
     private void setupMessageObserver() {
         viewModel.getMessagesLiveData().observe(this, (List<Message> messages) -> {
-            if (viewModel.getIsStreaming().getValue() != Boolean.TRUE) {
+            if (viewModel.getIsStreaming().getValue() == Boolean.TRUE) {
+                // 💡 终极修复 1：如果 AI 正在打字，千万不要用数据库的新列表去冲刷屏幕！
+                // 把它悄悄缓存在 pendingMessages 里，等打字机表演完再用。
+                pendingMessages = messages;
+            } else {
+                // 没在打字时，正常全局刷新
                 updateChatUI(messages);
             }
         });
@@ -271,43 +295,32 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
      * 设置流式输出 LiveData 的观察者
      */
     private void setupStreamingObservers() {
-        // 监听流式输出状态（是否正在返回内容）
+        // 1. 监听流式输出状态的变化
         viewModel.getIsStreaming().observe(this, isStreaming -> {
             if (activePersona == null) return;
 
             if (isStreaming) {
-                // 显示流式输出占位符
-                Message streamingPlaceholder = new Message(
-                        activePersona.getId(),
-                        "",
-                        false,
-                        activePersona.getName()
-                );
-                streamingPlaceholder.setId(STREAMING_PLACEHOLDER_ID);
-
-                adapter.addStreamingPlaceholder(streamingPlaceholder);
-                recyclerView.scrollToPosition(adapter.getItemCount() - 1);
-
-                // 禁用输入控件
+                // 开始打字：仅禁用输入控件
                 sendButton.setEnabled(false);
                 messageEditText.setEnabled(false);
-
             } else {
-                // 移除占位符，恢复输入控件可用
-                adapter.removeStreamingPlaceholder(STREAMING_PLACEHOLDER_ID);
-
+                // 结束打字：恢复输入控件
                 sendButton.setEnabled(true);
                 messageEditText.setEnabled(true);
 
-                if (adapter.getItemCount() > 0) {
-                    recyclerView.scrollToPosition(adapter.getItemCount() - 1);
+                // 💡 终极修复 2：打字彻底结束后，把刚才缓存的数据库真实记录刷上屏幕，完美交接！
+                if (pendingMessages != null) {
+                    updateChatUI(pendingMessages);
+                    pendingMessages = null;
                 }
             }
         });
 
-        viewModel.getStreamingTextChunk().observe(this, chunk -> {
-            if (chunk != null) {
-                adapter.appendContentToPlaceholder(chunk);
+        // 2. 监听真实流式文本的下发
+        viewModel.getCurrentStreamingText().observe(this, text -> {
+            if (text != null && !text.isEmpty()) {
+                // 调用我们在 MessageAdapter 里写的丝滑局部刷新
+                adapter.updateStreamingText(text);
                 recyclerView.scrollToPosition(adapter.getItemCount() - 1);
             }
         });
@@ -421,6 +434,19 @@ public class ChatActivity extends AppCompatActivity implements View.OnClickListe
         }
 
         if (!messageText.isEmpty()) {
+            // 💡 终极修复 3：在点击发送的【瞬间】，在主线程立刻死锁打字状态，绝不给数据库抢跑的机会！
+            viewModel.setChatStreaming(true);
+
+            // 瞬间把你的问题上屏（绝对不会再被吞了）
+            Message tempUserMsg = new Message(activePersona.getId(), messageText, true, "用户");
+            adapter.addMessage(tempUserMsg);
+
+            // 瞬间追加一个且只有【唯一一个】AI 的思考占位符
+            Message typingPlaceholder = new Message(activePersona.getId(), "正在思考...", false, activePersona.getName());
+            adapter.addMessage(typingPlaceholder);
+            recyclerView.scrollToPosition(adapter.getItemCount() - 1);
+
+            // 后台默默发网络请求并写入数据库
             viewModel.sendMessage(messageText, activePersona);
             messageEditText.setText("");
         } else {
