@@ -17,13 +17,14 @@ import com.example.demo.data.MessageDao;
 /**
  * AppDatabase 是 Room 数据库的抽象类入口
  */
-@Database(entities = {Persona.class, Dynamic.class, Message.class, KnowledgeChunk.class}, version = 3, exportSchema = false)
+@Database(entities = {Persona.class, Dynamic.class, Message.class, KnowledgeChunk.class, Todo.class}, version = 4, exportSchema = false)
 @TypeConverters({VectorConverters.class}) // 3. 挂载转换器
 public abstract class AppDatabase extends RoomDatabase {
 
     public abstract PersonaDao personaDao();
     public abstract DynamicDao dynamicDao();
     public abstract MessageDao messageDao();
+    public abstract TodoDao todoDao();
 
     public abstract KnowledgeChunkDao knowledgeChunkDao();
 

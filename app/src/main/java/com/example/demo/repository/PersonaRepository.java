@@ -18,6 +18,8 @@ import com.example.demo.data.Message;
 import com.example.demo.data.MessageDao;
 import com.example.demo.data.KnowledgeChunk;
 import com.example.demo.data.KnowledgeChunkDao;
+import com.example.demo.data.Todo;
+import com.example.demo.data.TodoDao;
 
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -39,6 +41,7 @@ public class PersonaRepository {
     private final LiveData<Persona> activePersonaLiveData;
     private final LiveData<List<Persona>> allPersonasLiveData;
     private final LiveData<List<Dynamic>> allDynamicsLiveData;
+    private final TodoDao todoDao;
     /**
      * 【同步查询】获取最新几条历史消息，赋予 Agent 短期记忆
      */
@@ -75,6 +78,7 @@ public class PersonaRepository {
         personaDao = db.personaDao();
         dynamicDao = db.dynamicDao();
         messageDao = db.messageDao();
+        todoDao = db.todoDao();
         knowledgeChunkDao = db.knowledgeChunkDao();
 
         executorService = Executors.newSingleThreadExecutor();
@@ -170,5 +174,13 @@ public class PersonaRepository {
         executorService.execute(() -> {
             knowledgeChunkDao.deleteChunksByDocName(personaId, docName);
         });
+    }
+
+    public void insertTodo(Todo todo) {
+        executorService.execute(() -> todoDao.insert(todo));
+    }
+
+    public List<Todo> getPendingTodosSync(int personaId) {
+        return todoDao.getPendingTodosSync(personaId);
     }
 }

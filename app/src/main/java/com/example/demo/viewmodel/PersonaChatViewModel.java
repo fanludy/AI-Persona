@@ -844,12 +844,14 @@ public class PersonaChatViewModel extends AndroidViewModel {
                 }
 
                 sbProbePrompt.append("\n【智能体核心行为准则】\n")
-                        .append("1. 日常闲聊（如问候、天气）：保持沉浸感，用第一人称简短、口语化回复。绝对不要提“作为一个AI”或主动背诵你的职业背景。\n")
-                        .append("2. 专业/事实问题：遇到询问具体知识时，【必须且只能】调用 search_local_docs 工具进行资料检索。\n")
-                        .append("3. 绘画/视觉请求：当用户想要看图片、要求画画时，【必须】调用 generate_image 工具，将用户的需求转化为英文 prompt 发送，绝对不要自己用文字去描述画面。\n")
-                        // 💡 提速核心秘籍：强行截断探针的无效思考！
-                        .append("4. 日常闲聊高速通道：如果用户的输入不需要调用上述任何工具，请你【必须且只能】回复字母：『PASS』，绝对不要生成任何实际的聊天回复内容！\n")
-                        .append("请根据上下文和用户当前的话语，严格判断应回复 PASS 还是调用合适的工具。");
+                        .append("1. 日常闲聊（如问候、天气）：保持沉浸感，用第一人称简短、口语化回复。绝对不要提“作为一个AI”。\n")
+                        .append("2. 专业/事实问题：遇到询问具体知识时，调用 search_local_docs 工具进行资料检索。\n")
+                        .append("3. 绘画/视觉请求：当用户想要看图片、要求画画时，调用 generate_image 工具。\n")
+                        // 💡 告诉 Agent 它有记事本了！
+                        .append("4. 日程管理：当用户要求你记录任务、安排日程或查询待办时，【必须】调用 add_todo 或 query_todos 工具。\n")
+                        // 💡 原封不动保留的高速通道，绝不影响闲聊速度！
+                        .append("5. 日常闲聊高速通道：如果用户的输入不需要调用上述任何工具，请你【必须且只能】回复字母：『PASS』，绝对不要生成任何实际回复！\n")
+                        .append("请严格判断应回复 PASS 还是调用合适的工具。");
 
                 JSONObject systemMsg = new JSONObject();
                 systemMsg.put("role", "system");
@@ -973,6 +975,85 @@ public class PersonaChatViewModel extends AndroidViewModel {
                                 repository.insert(loadingMsg);
                             });
                             generateImageRequest(imagePrompt, persona);
+                        }
+                        else if ("add_todo".equals(functionName)) {
+                            // ===== 触发添加待办 =====
+                            String taskName = argsObj.optString("task_name", "未知任务");
+                            String dueDate = argsObj.optString("due_date", "待定");
+                            Log.i(TAG, "Agent 调用添加待办: " + taskName + ", 时间: " + dueDate);
+
+                            // 1. 瞬间写入本地数据库
+                            com.example.demo.data.Todo newTodo = new com.example.demo.data.Todo(persona.getId(), taskName, dueDate, false);
+                            repository.insertTodo(newTodo);
+
+                            // 2. 告诉二次流式它成功了
+                            JSONArray followUpMessages = new JSONArray();
+                            followUpMessages.put(systemMsg);
+                            followUpMessages.put(userMsg);
+                            followUpMessages.put(responseMessage);
+                            JSONObject toolResultMsg = new JSONObject();
+                            toolResultMsg.put("role", "tool");
+                            toolResultMsg.put("name", "add_todo");
+                            toolResultMsg.put("tool_call_id", callId);
+                            toolResultMsg.put("content", "系统返回：已成功将任务【" + taskName + "】(时间：" + dueDate + ") 写入用户的日程数据库。");
+                            followUpMessages.put(toolResultMsg);
+
+                            // 3. 复用你最丝滑的流式打字机来告诉用户
+                            StringBuilder sbAgentPrompt = new StringBuilder();
+                            sbAgentPrompt.append("你现在的身份是 \"").append(persona.getName()).append("\"。刚才你调用了待办添加工具，并得到了系统成功的反馈。\n")
+                                    .append("请使用符合你人设的语气，告诉用户任务已成功记录，可以带点鼓励。\n\n");
+                            // (可在此处判断追加口语化等约束)
+
+                            List<Message> mockHistory = new ArrayList<>();
+                            for (int k = 1; k < followUpMessages.length(); k++) {
+                                JSONObject m = followUpMessages.getJSONObject(k);
+                                boolean isUserRole = "user".equals(m.optString("role"));
+                                mockHistory.add(new Message(persona.getId(), m.has("content") ? m.getString("content") : m.toString(), isUserRole, isUserRole ? "用户" : persona.getName()));
+                            }
+                            sendStreamingAiRequestWithCustomSystem(mockHistory, persona, sbAgentPrompt.toString());
+
+                        }
+                        else if ("query_todos".equals(functionName)) {
+                            // ===== 触发查询待办 =====
+                            Log.i(TAG, "Agent 调用查询待办");
+
+                            // 1. 从底层数据库捞出数据
+                            List<com.example.demo.data.Todo> pendingTodos = repository.getPendingTodosSync(persona.getId());
+                            StringBuilder todoListStr = new StringBuilder();
+                            if (pendingTodos == null || pendingTodos.isEmpty()) {
+                                todoListStr.append("当前数据库中没有未完成的任务。");
+                            } else {
+                                todoListStr.append("当前未完成任务列表：\n");
+                                for (int i = 0; i < pendingTodos.size(); i++) {
+                                    com.example.demo.data.Todo t = pendingTodos.get(i);
+                                    todoListStr.append(i + 1).append(". ").append(t.taskName).append(" (时间: ").append(t.dueDate).append(")\n");
+                                }
+                            }
+
+                            // 2. 将真实数据交给二次流式
+                            JSONArray followUpMessages = new JSONArray();
+                            followUpMessages.put(systemMsg);
+                            followUpMessages.put(userMsg);
+                            followUpMessages.put(responseMessage);
+                            JSONObject toolResultMsg = new JSONObject();
+                            toolResultMsg.put("role", "tool");
+                            toolResultMsg.put("name", "query_todos");
+                            toolResultMsg.put("tool_call_id", callId);
+                            toolResultMsg.put("content", "系统返回的真实数据：\n" + todoListStr.toString() + "\n请根据此数据，用你的人设口吻向用户汇报日程。");
+                            followUpMessages.put(toolResultMsg);
+
+                            // 3. 复用你最丝滑的流式打字机来播报
+                            StringBuilder sbAgentPrompt = new StringBuilder();
+                            sbAgentPrompt.append("你现在的身份是 \"").append(persona.getName()).append("\"。刚才你调用了查询待办工具，拿到了系统返回的日程数据。\n")
+                                    .append("请使用符合你人设的语气，自然地向用户播报这些任务。如果没有任务，可以顺势夸奖用户效率高。\n\n");
+
+                            List<Message> mockHistory = new ArrayList<>();
+                            for (int k = 1; k < followUpMessages.length(); k++) {
+                                JSONObject m = followUpMessages.getJSONObject(k);
+                                boolean isUserRole = "user".equals(m.optString("role"));
+                                mockHistory.add(new Message(persona.getId(), m.has("content") ? m.getString("content") : m.toString(), isUserRole, isUserRole ? "用户" : persona.getName()));
+                            }
+                            sendStreamingAiRequestWithCustomSystem(mockHistory, persona, sbAgentPrompt.toString());
                         }
                     } else {
                         // ==========================================
@@ -1523,6 +1604,49 @@ public class PersonaChatViewModel extends AndroidViewModel {
             drawFunc.put("parameters", drawParams);
             drawTool.put("function", drawFunc);
             toolsArray.put(drawTool);
+
+            // ==========================================
+            // 工具 3：添加待办事项 (add_todo)
+            // ==========================================
+            JSONObject addTodoTool = new JSONObject();
+            addTodoTool.put("type", "function");
+            JSONObject addTodoFunc = new JSONObject();
+            addTodoFunc.put("name", "add_todo");
+            addTodoFunc.put("description", "当用户要求你记住一个任务、安排日程、提醒他做某事时，调用此工具将任务添加到数据库。");
+            JSONObject addTodoParams = new JSONObject();
+            addTodoParams.put("type", "object");
+            JSONObject addTodoProps = new JSONObject();
+
+            JSONObject taskNameProp = new JSONObject();
+            taskNameProp.put("type", "string");
+            taskNameProp.put("description", "任务的具体内容摘要");
+            addTodoProps.put("task_name", taskNameProp);
+
+            JSONObject dueDateProp = new JSONObject();
+            dueDateProp.put("type", "string");
+            dueDateProp.put("description", "任务的截止时间（如'明天上午'，'2026-06-01'等，如果没有具体时间请填'待定'）");
+            addTodoProps.put("due_date", dueDateProp);
+
+            addTodoParams.put("properties", addTodoProps);
+            addTodoParams.put("required", new JSONArray().put("task_name").put("due_date"));
+            addTodoFunc.put("parameters", addTodoParams);
+            addTodoTool.put("function", addTodoFunc);
+            toolsArray.put(addTodoTool);
+
+            // ==========================================
+            // 工具 4：查询待办事项 (query_todos)
+            // ==========================================
+            JSONObject queryTodoTool = new JSONObject();
+            queryTodoTool.put("type", "function");
+            JSONObject queryTodoFunc = new JSONObject();
+            queryTodoFunc.put("name", "query_todos");
+            queryTodoFunc.put("description", "当用户问'我今天有什么安排'、'我的待办事项是什么'、'提醒我一下要做什么'时，调用此工具查询未完成任务列表。");
+            JSONObject queryTodoParams = new JSONObject();
+            queryTodoParams.put("type", "object");
+            queryTodoParams.put("properties", new JSONObject());
+            queryTodoFunc.put("parameters", queryTodoParams);
+            queryTodoTool.put("function", queryTodoFunc);
+            toolsArray.put(queryTodoTool);
         } catch (JSONException e) {
             Log.e(TAG, "构建工具箱 JSON 失败", e);
         }
